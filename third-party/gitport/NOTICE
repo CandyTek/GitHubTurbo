@@ -1,0 +1,13 @@
+GitPort GitHub reference project
+Source: https://github.com/zhidian-cmd/gitport-github
+Reviewed revision: 391c2b1ff093eb865c218eecc88d5a92fb88494f
+License: Apache License 2.0 (included as LICENSE in this directory).
+
+assets/route-seeds.json is derived from src/pool/seeds.json in that project.
+Changes by GitHubTurbo (2026-11-08): retained only IP/host route facts;
+removed spoofed SNI, alternate verification anchors, mirrors and host policies.
+Every imported address is untrusted until a TLS connection verifies the original hostname.
+
+The connection pool, route health, bounded public cache, validated range download,
+management UI and tests are new implementations informed by a review of GitPort's design.
+No GitPort executable, private keys or user configuration are redistributed.

@@ -1,0 +1,27 @@
+{
+  "listen": "127.0.0.1:18080",
+  "upstream": null,
+  "mode": "auto",
+  "host_modes": {},
+  "connect_timeout_ms": 5000,
+  "probe_timeout_ms": 6000,
+  "cache_seconds": 120,
+  "max_connections": 128,
+  "max_routes": 256,
+  "idle_timeout_seconds": 300,
+  "ip_overrides": {},
+  "transparent": {
+    "enabled": true,
+    "https_listen": "127.0.0.1:443",
+    "http_listen": "127.0.0.1:80",
+    "dns_listen": "127.0.0.1:53",
+    "state_dir": "state",
+    "try_without_sni": true
+  },
+  "optimization": {
+    "http2": true,
+    "public_cache": true,
+    "segmented_downloads": true,
+    "seed_routes": true
+  }
+}

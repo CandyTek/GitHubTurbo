@@ -1,0 +1,9 @@
+/target/
+/dist/
+/reports/
+/tools/
+*.log
+/state/
+/packages/
+/config.legacy.json
+

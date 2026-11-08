@@ -1,0 +1,491 @@
+[
+  {
+    "ip": "140.82.112.3",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.4",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.3",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.4",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.3",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.4",
+    "hosts": [
+      "github.com",
+      "*.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.116.3",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "140.82.116.4",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "140.82.121.3",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "140.82.121.4",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.207.73.82",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.27.177.113",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.27.177.114",
+    "hosts": [
+      "github.com",
+      "codeload.github.com"
+    ]
+  },
+  {
+    "ip": "20.200.245.247",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.200.245.248",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.205.243.166",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.205.243.167",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.205.243.168",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.26.156.215",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.201.28.151",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.233.83.145",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "20.87.245.0",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "4.237.22.38",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "4.228.31.150",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "4.208.26.197",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "172.182.252.133",
+    "hosts": [
+      "github.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.5",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.6",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.5",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.6",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.5",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.6",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "20.27.177.116",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "20.200.245.245",
+    "hosts": [
+      "api.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.21",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.22",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.21",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.22",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.21",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.22",
+    "hosts": [
+      "viewscreen.githubusercontent.com",
+      "objects-origin.githubusercontent.com",
+      "api.mcp.github.com"
+    ]
+  },
+  {
+    "ip": "20.205.243.161",
+    "hosts": [
+      "uploads.github.com"
+    ]
+  },
+  {
+    "ip": "4.249.131.160",
+    "hosts": [
+      "copilot-proxy.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.108.153",
+    "hosts": [
+      "github.io",
+      "desktop.github.com",
+      "pages.github.com",
+      "skills.github.com",
+      "archiveprogram.github.com",
+      "socialimpact.github.com"
+    ]
+  },
+  {
+    "ip": "185.199.109.153",
+    "hosts": [
+      "github.io",
+      "desktop.github.com",
+      "pages.github.com",
+      "skills.github.com",
+      "archiveprogram.github.com",
+      "socialimpact.github.com"
+    ]
+  },
+  {
+    "ip": "185.199.110.153",
+    "hosts": [
+      "github.io",
+      "desktop.github.com",
+      "pages.github.com",
+      "skills.github.com",
+      "archiveprogram.github.com",
+      "socialimpact.github.com"
+    ]
+  },
+  {
+    "ip": "185.199.111.153",
+    "hosts": [
+      "github.io",
+      "desktop.github.com",
+      "pages.github.com",
+      "skills.github.com",
+      "archiveprogram.github.com",
+      "socialimpact.github.com"
+    ]
+  },
+  {
+    "ip": "185.199.108.154",
+    "hosts": [
+      "agent.github.com",
+      "docs.github.com",
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.109.154",
+    "hosts": [
+      "agent.github.com",
+      "docs.github.com",
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.110.154",
+    "hosts": [
+      "agent.github.com",
+      "docs.github.com",
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.111.154",
+    "hosts": [
+      "agent.github.com",
+      "docs.github.com",
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.108.215",
+    "hosts": [
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.109.215",
+    "hosts": [
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.110.215",
+    "hosts": [
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.111.215",
+    "hosts": [
+      "githubassets.com",
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.108.133",
+    "hosts": [
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "support.github.com",
+      "resources.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.109.133",
+    "hosts": [
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "support.github.com",
+      "resources.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.110.133",
+    "hosts": [
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "support.github.com",
+      "resources.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "185.199.111.133",
+    "hosts": [
+      "*.githubusercontent.com",
+      "raw.github.com",
+      "support.github.com",
+      "resources.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.29",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "140.82.112.30",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.29",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "140.82.113.30",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.29",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "140.82.114.30",
+    "hosts": [
+      "githubapp.com"
+    ]
+  },
+  {
+    "ip": "20.205.243.165",
+    "hosts": [
+      "codeload.github.com"
+    ]
+  }
+]
