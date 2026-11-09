@@ -1,7 +1,9 @@
 [package]
 name = "github-turbo"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/CandyTek/GitHubTurbo"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "time", "sync", "signal"] }

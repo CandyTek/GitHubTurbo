@@ -5,7 +5,7 @@
   "host_modes": {},
   "connect_timeout_ms": 5000,
   "probe_timeout_ms": 6000,
-  "cache_seconds": 120,
+  "cache_seconds": 600,
   "max_connections": 128,
   "max_routes": 256,
   "idle_timeout_seconds": 300,
@@ -28,6 +28,9 @@
     "range_pipeline": false,
     "adaptive_split": true,
     "host_sources": true,
-    "adaptive_routing": true
+    "adaptive_routing": true,
+    "flow_rescue": true,
+    "prewarm": true,
+    "git_race": false
   }
 }

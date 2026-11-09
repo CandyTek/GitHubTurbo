@@ -144,7 +144,13 @@ try {
         $ready = $false
         for ($attempt=0; $attempt -lt 30; $attempt++) {
             if ($engine.HasExited) { throw 'Engine exited; see state/engine.log' }
-            try { $status = Invoke-RestMethod -Uri "http://$($cfg.listen)/status" -TimeoutSec 1; if ($status.version -like '0.5.*') { $ready=$true; break } } catch {}
+            # Ready means the engine started above answers, whatever its version: the
+            # port was free before the start, and its owner must be this exact process.
+            try {
+                $status = Invoke-RestMethod -Uri "http://$($cfg.listen)/status" -TimeoutSec 1
+                $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | ForEach-Object OwningProcess)
+                if ($status.name -eq 'GitHubTurbo' -and $owners -contains $engine.Id) { $ready=$true; break }
+            } catch {}
             Start-Sleep -Milliseconds 100
         }
         if (!$ready) { throw 'Engine did not become ready' }

@@ -238,7 +238,7 @@ class Sidecar:
 
     def status(self):
         s = local(self.control+'/status')
-        return {k:s[k] for k in ('pool','cache','health','downloaded_bytes','uploaded_bytes','range_memo','warm_tls','transfers','routes','host_sources','transfer_history') if k in s}
+        return {k:s[k] for k in ('pool','cache','health','downloaded_bytes','uploaded_bytes','range_memo','warm_tls','transfers','routes','host_sources','transfer_history','rescue','prewarm','git_race') if k in s}
 
 def resolve(host, cancel):
     # Dedicated bootstrap bypasses Windows hosts/NRPT and all proxy environment variables.
@@ -623,7 +623,7 @@ def options(value):
     if not 1<=rounds<=10 or not 5<=timeout<=300 or phases not in ('both','cold','warm'):
         raise ValueError('Rounds 1..10; timeout 5..300; phases cold/warm/both')
     feature = value.get('feature','version')
-    if feature not in ('version','probe_reuse','range_memo','range_pipeline','adaptive_split','segmented_downloads'):
+    if feature not in ('version','probe_reuse','range_memo','range_pipeline','adaptive_split','segmented_downloads','flow_rescue','prewarm','git_race'):
         raise ValueError('Unknown experiment')
     fixed_ips=value.get('fixed_ips')
     if fixed_ips is None:
@@ -771,7 +771,7 @@ def main():
     run.add_argument('--candidate-options',type=json.loads)
     run.add_argument('--baseline-options',type=json.loads)
     run.add_argument('--fixed-ips',type=json.loads,help='Controlled comparison: same public IP mapping on both Turbo instances')
-    run.add_argument('--feature',default='version',choices=['version','probe_reuse','range_memo','range_pipeline','adaptive_split','segmented_downloads'])
+    run.add_argument('--feature',default='version',choices=['version','probe_reuse','range_memo','range_pipeline','adaptive_split','segmented_downloads','flow_rescue','prewarm','git_race'])
     run.add_argument('--require-success',action='store_true')
     args = parser.parse_args()
     if args.action=='freeze':

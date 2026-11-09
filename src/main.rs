@@ -17,12 +17,27 @@ use tokio::{
     time::timeout,
 };
 use tokio_native_tls::{native_tls, TlsConnector};
+/// Set by `github-turbo git`, whose stderr belongs to git.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Routine engine notes, silenced while git owns the console.
+macro_rules! note {
+    ($($arg:tt)*) => {
+        if !QUIET.load(Ordering::Relaxed) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 mod content_cache;
 mod control;
 mod download;
 mod forward;
+mod git_wrapper;
 mod health;
+mod ipv6;
 mod pool;
+mod prewarm;
+mod race;
+mod rescue;
 mod resolver;
 mod routing;
 mod sources;
@@ -93,6 +108,9 @@ struct Optimization {
     adaptive_split: bool,
     host_sources: bool,
     adaptive_routing: bool,
+    flow_rescue: bool,
+    prewarm: bool,
+    git_race: bool,
 }
 impl Default for Optimization {
     fn default() -> Self {
@@ -107,9 +125,15 @@ impl Default for Optimization {
             adaptive_split: true,
             host_sources: true,
             adaptive_routing: true,
+            flow_rescue: true,
+            prewarm: true,
+            git_race: false,
         }
     }
 }
+// How long past `cache_seconds` an idle web route may still answer at once while
+// a fresh probe runs behind it. A dead one fails over through the usual retry.
+const ROUTE_STALE_SECONDS: u64 = 3600;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
@@ -163,6 +187,9 @@ struct State {
     warm: warm::Warm,
     sources: sources::Sources,
     performance: routing::Performance,
+    rescue: rescue::Stats,
+    prewarm: prewarm::Prewarm,
+    race: race::Stats,
 }
 
 fn err(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
@@ -280,6 +307,9 @@ impl State {
             warm: warm::Warm::default(),
             sources: sources::Sources::default(),
             performance: routing::Performance::default(),
+            rescue: rescue::Stats::default(),
+            prewarm: prewarm::Prewarm::default(),
+            race: race::Stats::default(),
             tls: native_tls::TlsConnector::builder()
                 .request_alpns(&["http/1.1"])
                 .build()?
@@ -333,19 +363,42 @@ impl State {
             }
         }
         addresses.retain(|a| public_ip(a.ip()));
+        let mut addresses = routing::reachable(addresses, self.resolver.ipv6_usable());
         addresses.truncate(32);
         if addresses.is_empty() {
             return Err(err("no public address resolved"));
         }
         Ok(addresses)
     }
+    /// IPv6 routes are only worth trying while IPv6 works on this machine.
+    fn family_usable(&self, route: &Route) -> bool {
+        match route {
+            Route::Direct(a) | Route::DirectNoSni(a) => a.is_ipv4() || self.resolver.ipv6_usable(),
+            Route::Proxy => true,
+        }
+    }
     async fn dial(&self, host: &str, route: &Route) -> Result<TcpStream> {
+        // The one place every connection passes: no IPv6 packet leaves while
+        // IPv6 is known not to work, whatever cache or list the route came from.
+        if !self.family_usable(route) {
+            return Err(err("IPv6 is not usable on this network"));
+        }
         timeout(
             Duration::from_millis(self.config.connect_timeout_ms),
             async {
                 let mut stream = match route {
                     Route::Direct(address) | Route::DirectNoSni(address) => {
-                        TcpStream::connect(address).await?
+                        let connect = TcpStream::connect(address);
+                        let result = if address.is_ipv6() {
+                            // A timeout here is a failure too; measure it ourselves.
+                            let limit = Duration::from_millis(self.config.connect_timeout_ms);
+                            let result = timeout(limit, connect).await;
+                            self.resolver.ipv6.record(matches!(result, Ok(Ok(_))));
+                            result.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+                        } else {
+                            connect.await
+                        };
+                        result?
                     }
                     Route::Proxy => {
                         TcpStream::connect(
@@ -404,7 +457,12 @@ impl State {
         } else {
             vec![]
         };
-        let groups = [routing::spread(&sources, 8), routing::spread(&seeds, 8)];
+        // Drop addresses this machine cannot reach first, so they do not use up slots.
+        let ipv6 = self.resolver.ipv6_usable();
+        let groups = [
+            routing::spread(&routing::reachable(sources, ipv6), 8),
+            routing::spread(&routing::reachable(seeds, ipv6), 8),
+        ];
         let mut out = Vec::new();
         for n in 0..8 {
             for group in &groups {
@@ -492,6 +550,7 @@ impl State {
         addresses: Vec<SocketAddr>,
         ordered: bool,
     ) -> Result<Route> {
+        let addresses = routing::reachable(addresses, self.resolver.ipv6_usable());
         let mut jobs = JoinSet::new();
         for (index, address) in routing::spread(&addresses, 8).into_iter().enumerate() {
             for no_sni in [false, true] {
@@ -567,16 +626,46 @@ impl State {
         if self.config.mode_for(host) == Mode::Proxy {
             return Ok(Route::Proxy);
         }
-        if let Some(cached) = self.routes.lock().await.get(&key) {
-            if cached.at.elapsed().as_secs() < self.config.cache_seconds
-                && !self.health.bad(host, &cached.route)
-                && (traffic != Traffic::Bulk
-                    || !self.optimization().adaptive_routing
-                    || !self.performance.slow(host, &cached.route))
-            {
-                return Ok(cached.route.clone());
+        let stale = {
+            let routes = self.routes.lock().await;
+            match routes.get(&key) {
+                Some(cached) if self.route_fresh(host, traffic, cached) => {
+                    return Ok(cached.route.clone())
+                }
+                Some(cached)
+                    if traffic == Traffic::Latency
+                        && cached.at.elapsed().as_secs()
+                            < self.config.cache_seconds + ROUTE_STALE_SECONDS
+                        && self.family_usable(&cached.route)
+                        && !self.health.bad(host, &cached.route) =>
+                {
+                    Some(cached.route.clone())
+                }
+                _ => None,
             }
+        };
+        if let Some(route) = stale {
+            let state = self.clone();
+            let refresh = host.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = state.probe_route(&refresh, traffic).await {
+                    note!("route refresh {refresh}: {error}");
+                }
+            });
+            return Ok(route);
         }
+        self.probe_route(host, traffic).await
+    }
+    fn route_fresh(&self, host: &str, traffic: Traffic, cached: &Cached) -> bool {
+        cached.at.elapsed().as_secs() < self.config.cache_seconds
+            && self.family_usable(&cached.route)
+            && !self.health.bad(host, &cached.route)
+            && (traffic != Traffic::Bulk
+                || !self.optimization().adaptive_routing
+                || !self.performance.slow(host, &cached.route))
+    }
+    async fn probe_route(self: &Arc<Self>, host: &str, traffic: Traffic) -> Result<Route> {
+        let key = traffic.key(host);
         let lock = {
             let mut locks = self.locks.lock().await;
             if !locks.contains_key(&key) && locks.len() >= self.config.max_routes {
@@ -592,12 +681,7 @@ impl State {
         };
         let _guard = lock.lock().await;
         if let Some(cached) = self.routes.lock().await.get(&key) {
-            if cached.at.elapsed().as_secs() < self.config.cache_seconds
-                && !self.health.bad(host, &cached.route)
-                && (traffic != Traffic::Bulk
-                    || !self.optimization().adaptive_routing
-                    || !self.performance.slow(host, &cached.route))
-            {
+            if self.route_fresh(host, traffic, cached) {
                 return Ok(cached.route.clone());
             }
         }
@@ -615,7 +699,7 @@ impl State {
             }
         };
         self.cache_route_for(host, traffic, route.clone()).await;
-        eprintln!("route {host}: {route:?}");
+        note!("route {host}: {route:?}");
         Ok(route)
     }
     async fn cache_route(&self, host: &str, route: Route) {
@@ -656,7 +740,9 @@ impl State {
         if self.config.transparent.enabled && self.config.transparent.try_without_sni {
             routes.extend(addresses.iter().copied().map(Route::DirectNoSni));
         }
-        routes.retain(|route| Some(route) != current && !self.health.bad(host, route));
+        routes.retain(|route| {
+            Some(route) != current && self.family_usable(route) && !self.health.bad(host, route)
+        });
         if traffic == Traffic::Bulk && self.optimization().adaptive_routing {
             // Keep fresh DNS ahead of unmeasured hosts/seed entries. Latency is
             // not a throughput score. Known slow transfers go to the back.
@@ -721,7 +807,7 @@ impl State {
         };
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let age = now.saturating_sub(doc["saved"].as_i64().unwrap_or(0));
-        if doc["schema"].as_u64() != Some(2) || !(0..=120).contains(&age) {
+        if doc["schema"].as_u64() != Some(2) || age < 0 || age as u64 > self.config.cache_seconds {
             return;
         }
         if let Some(entries) = doc["routes"].as_array() {
@@ -735,7 +821,7 @@ impl State {
                 let Ok(route) = serde_json::from_value::<Route>(entry["route"].clone()) else {
                     continue;
                 };
-                if matches!(&route,Route::Direct(address)|Route::DirectNoSni(address) if public_ip(address.ip())&&address.port()==443)
+                if matches!(&route,Route::Direct(address)|Route::DirectNoSni(address) if public_ip(address.ip())&&address.port()==443&&(address.is_ipv4()||self.resolver.ipv6_usable()))
                 {
                     let route_age =
                         age as u64 + entry["age"].as_u64().unwrap_or(self.config.cache_seconds);
@@ -746,7 +832,11 @@ impl State {
                     }
                     self.cache_route(host, route).await;
                     if let Some(cached) = self.routes.lock().await.get_mut(host) {
-                        cached.at = Instant::now() - Duration::from_secs(route_age);
+                        // An Instant cannot predate boot, and a route can be older.
+                        if let Some(at) = Instant::now().checked_sub(Duration::from_secs(route_age))
+                        {
+                            cached.at = at;
+                        }
                     }
                 }
             }
@@ -774,7 +864,7 @@ impl State {
                     }
                     Route::Proxy => self.best_direct(host).await?,
                 };
-                eprintln!("fallback {host}: {fallback:?}");
+                note!("fallback {host}: {fallback:?}");
                 let stream = self.dial(host, &fallback).await?;
                 self.cache_route(host, fallback).await;
                 Ok(stream)
@@ -1028,10 +1118,29 @@ async fn diagnose(state: Arc<State>) -> Result<()> {
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
-        println!("GitHubTurbo 0.5\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\nDefault: enable system integration. Config: beside executable, otherwise ./config.json");
+        println!("GitHubTurbo 0.5\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\n       github-turbo git <git arguments>   (one git command, no system changes)\nDefault: enable system integration. Config: beside executable, otherwise ./config.json");
         return Ok(());
     }
     let command = args.first().map(String::as_str).unwrap_or("enable");
+    if command == "git" {
+        let sibling = std::env::current_exe()?.with_file_name("config.json");
+        let (bytes, base) = match std::fs::read(&sibling) {
+            Ok(bytes) => (bytes, sibling),
+            Err(_) => (
+                include_bytes!("../config.json").to_vec(),
+                std::env::current_exe()?,
+            ),
+        };
+        let mut config: Config = serde_json::from_slice(&bytes)?;
+        if config.transparent.state_dir.is_relative() {
+            config.transparent.state_dir = base
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(&config.transparent.state_dir);
+        }
+        let code = git_wrapper::run(config, &args[1..]).await?;
+        std::process::exit(code);
+    }
     if command == "watch" {
         return watchdog::run(
             args.get(1)
@@ -1100,6 +1209,7 @@ async fn main() -> Result<()> {
     }
     state.restore_routes().await;
     state.sources.restore(&state.config.transparent.state_dir);
+    prewarm::start(&state);
     let sources_state = state.clone();
     let sources_task = tokio::spawn(async move {
         loop {
@@ -1124,6 +1234,7 @@ async fn main() -> Result<()> {
             tokio::time::sleep(Duration::from_secs(30)).await;
             maintenance.pool.prune().await;
             maintenance.warm.prune().await;
+            prewarm::keep_hot(&maintenance);
             let _ = maintenance.persist_routes().await;
         }
     });
@@ -1198,6 +1309,36 @@ mod tests {
         let cache = state.routes.lock().await;
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key("github.com"));
+    }
+    #[tokio::test]
+    async fn idle_web_route_answers_at_once_unless_it_is_in_cooldown() {
+        let mut cfg = config();
+        // A short lifetime keeps the test free of Instants that predate boot.
+        cfg.cache_seconds = 1;
+        cfg.optimization.seed_routes = false;
+        cfg.optimization.host_sources = false;
+        cfg.ip_overrides
+            .insert("github.com".into(), vec!["140.82.112.3".parse().unwrap()]);
+        let mut state = State::new(cfg).unwrap();
+        // Probing an address that is never usable fails at once and without traffic.
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .config
+            .ip_overrides
+            .insert("github.com".into(), vec!["127.0.0.1".parse().unwrap()]);
+        let route = Route::Direct("140.82.112.3:443".parse().unwrap());
+        state.cache_route("github.com", route.clone()).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let start = Instant::now();
+        assert_eq!(state.select("github.com").await.unwrap(), route);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        state
+            .health
+            .fail("github.com", &route, health::Failure::Network);
+        assert!(
+            state.select("github.com").await.is_err(),
+            "a route in cooldown must be probed again rather than served"
+        );
     }
     #[tokio::test]
     async fn old_route_cache_is_ignored_and_profiles_do_not_overwrite_each_other() -> Result<()> {

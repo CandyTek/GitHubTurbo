@@ -106,6 +106,12 @@ impl Health {
         let now = Instant::now();
         serde_json::json!({"edges":edges.iter().map(|((host,route),e)|serde_json::json!({"host":host,"route":route,"successes":e.good,"failures":e.failures,"ewma_ms":e.ewma as u64,"cooldown_seconds":e.until.saturating_duration_since(now).as_secs()})).collect::<Vec<_>>(),"events":*self.events.lock().unwrap()})
     }
+    pub fn forget(&self, host: &str) {
+        self.edges
+            .lock()
+            .unwrap()
+            .retain(|(name, _), _| name != host);
+    }
     pub fn clear(&self) {
         self.edges.lock().unwrap().clear();
     }

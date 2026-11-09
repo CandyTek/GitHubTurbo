@@ -21,7 +21,7 @@ pub async fn status(state: &State) -> serde_json::Value {
     let entries:Vec<_>=routes.iter().map(|(host,cached)|serde_json::json!({"host":host.strip_prefix("bulk:").unwrap_or(host),"profile":if host.starts_with("bulk:"){"bulk"}else{"latency"},"route":cached.route,"age_seconds":cached.at.elapsed().as_secs()})).collect();
     drop(routes);
     let c = &state.counters;
-    serde_json::json!({"name":"GitHubTurbo","version":env!("CARGO_PKG_VERSION"),"transparent":state.config.transparent.enabled,"listen":state.config.listen,"upstream":state.config.upstream,"mode":state.config.mode,"host_modes":state.config.host_modes,"optimization":state.optimization(),"uptime_seconds":state.started.elapsed().as_secs(),"accepted":c.accepted.load(Ordering::Relaxed),"completed":c.completed.load(Ordering::Relaxed),"failures":c.failures.load(Ordering::Relaxed),"uploaded_bytes":c.uploaded.load(Ordering::Relaxed),"downloaded_bytes":c.downloaded.load(Ordering::Relaxed),"routes":entries,"pool":state.pool.snapshot().await,"health":state.health.snapshot(),"cache":state.content_cache.snapshot(),"range_memo":state.download_memo.snapshot(),"warm_tls":state.warm.snapshot().await,"split_active":2-state.split_slots.available_permits(),"host_sources":state.sources.snapshot(),"transfer_history":state.performance.snapshot()})
+    serde_json::json!({"name":"GitHubTurbo","version":env!("CARGO_PKG_VERSION"),"transparent":state.config.transparent.enabled,"listen":state.config.listen,"upstream":state.config.upstream,"mode":state.config.mode,"host_modes":state.config.host_modes,"optimization":state.optimization(),"uptime_seconds":state.started.elapsed().as_secs(),"accepted":c.accepted.load(Ordering::Relaxed),"completed":c.completed.load(Ordering::Relaxed),"failures":c.failures.load(Ordering::Relaxed),"uploaded_bytes":c.uploaded.load(Ordering::Relaxed),"downloaded_bytes":c.downloaded.load(Ordering::Relaxed),"routes":entries,"pool":state.pool.snapshot().await,"health":state.health.snapshot(),"cache":state.content_cache.snapshot(),"range_memo":state.download_memo.snapshot(),"warm_tls":state.warm.snapshot().await,"split_active":2-state.split_slots.available_permits(),"host_sources":state.sources.snapshot(),"transfer_history":state.performance.snapshot(),"rescue":state.rescue.snapshot(),"prewarm":state.prewarm.snapshot(),"git_race":state.race.snapshot(),"ipv6":state.resolver.ipv6.snapshot()})
 }
 pub async fn write(path: &str, stream: &mut TcpStream, state: &Arc<State>) -> Result<()> {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
@@ -58,6 +58,9 @@ pub async fn write(path: &str, stream: &mut TcpStream, state: &Arc<State>) -> Re
                     "adaptive_split" => next.adaptive_split = value,
                     "host_sources" => next.host_sources = value,
                     "adaptive_routing" => next.adaptive_routing = value,
+                    "flow_rescue" => next.flow_rescue = value,
+                    "prewarm" => next.prewarm = value,
+                    "git_race" => next.git_race = value,
                     _ => {
                         return respond(stream, "400 Bad Request", "text/plain", "Unknown option\n")
                             .await
@@ -88,9 +91,11 @@ pub async fn write(path: &str, stream: &mut TcpStream, state: &Arc<State>) -> Re
             respond(stream, "200 OK", "application/json", "{\"ok\":true}").await
         }
         "/api/reset" => {
+            state.prewarm.clear();
             state.pool.clear().await;
             state.warm.clear().await;
             state.routes.lock().await.clear();
+            state.resolver.clear().await;
             state.health.clear();
             state.performance.clear();
             state.content_cache.clear();

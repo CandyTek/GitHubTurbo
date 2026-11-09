@@ -1,8 +1,40 @@
 use super::*;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, service::service_fn, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+type TestBody =
+    http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+// 16 KiB per 100 ms is well under the rescue threshold. After `slow_for` the rest
+// arrives at once, so a test that relies on rescue never waits for this to finish.
+fn throttled(content: Bytes, slow_for: Duration) -> TestBody {
+    let began = Instant::now();
+    http_body_util::StreamBody::new(futures_util::stream::unfold(
+        (content, began),
+        move |(mut rest, began)| async move {
+            if rest.is_empty() {
+                return None;
+            }
+            let chunk = if began.elapsed() < slow_for {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                rest.split_to(rest.len().min(16 * 1024))
+            } else {
+                rest.split_to(rest.len())
+            };
+            Some((
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(hyper::body::Frame::data(chunk)),
+                (rest, began),
+            ))
+        },
+    ))
+    .boxed_unsync()
+}
+fn entity(content_length: usize) -> hyper::http::response::Builder {
+    Response::builder()
+        .header("content-type", "image/png")
+        .header("etag", "\"entity1\"")
+        .header("content-length", content_length)
+}
 struct Fixture {
     state: Arc<State>,
     addr: SocketAddr,
@@ -128,7 +160,73 @@ impl Fixture {
                                         }),
                                 );
                             }
-                            let path = request.uri().path();
+                            let path = request.uri().path().to_owned();
+                            let path = path.as_str();
+                            let size = content.len();
+                            let ranged = request.headers().contains_key("range");
+                            let hour = Duration::from_secs(3600);
+                            if matches!(path, "/wrong-edge" | "/real-refusal") {
+                                let mut reply = Response::builder().status(400);
+                                if path == "/real-refusal" {
+                                    reply = reply.header("x-github-request-id", "8CA1:415C2");
+                                }
+                                return Ok(reply.body(Full::new(Bytes::new())).unwrap().map(
+                                    |body| {
+                                        body.map_err(
+                                            |never| -> Box<dyn std::error::Error + Send + Sync> {
+                                                match never {}
+                                            },
+                                        )
+                                        .boxed_unsync()
+                                    },
+                                ));
+                            }
+                            match (path, ranged) {
+                                // Never finishes unless the download moves elsewhere.
+                                ("/trickle" | "/unlucky" | "/slow.git/git-upload-pack", false) => {
+                                    return Ok(entity(size)
+                                        .body(throttled(content, hour))
+                                        .unwrap());
+                                }
+                                // Ignores Range, and speeds up after the rescue has begun.
+                                ("/no-range", _) => {
+                                    return Ok(entity(size)
+                                        .body(throttled(content, Duration::from_millis(1800)))
+                                        .unwrap());
+                                }
+                                ("/dies", false) => {
+                                    use futures_util::StreamExt;
+                                    let head = content.slice(..256 * 1024);
+                                    // Paced, so the reset cannot overtake the headers.
+                                    let body = futures_util::stream::iter([
+                                        Ok(hyper::body::Frame::data(head)),
+                                        Err(err("connection lost")),
+                                    ])
+                                    .then(|item| async move {
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                        item
+                                    });
+                                    return Ok(entity(size)
+                                        .body(http_body_util::StreamBody::new(body).boxed_unsync())
+                                        .unwrap());
+                                }
+                                // The first replacement connections are unlucky too.
+                                ("/unlucky", true)
+                                    if UNLUCKY.fetch_add(1, Ordering::SeqCst) < 2 =>
+                                {
+                                    let range = request.headers()["range"].to_str().unwrap();
+                                    let (a, b) =
+                                        range.trim_start_matches("bytes=").split_once('-').unwrap();
+                                    let (a, b) = (a.parse().unwrap(), b.parse::<usize>().unwrap());
+                                    return Ok(Response::builder()
+                                        .status(206)
+                                        .header("content-range", format!("bytes {a}-{b}/{size}"))
+                                        .header("etag", "\"entity1\"")
+                                        .body(throttled(content.slice(a..=b), hour))
+                                        .unwrap());
+                                }
+                                _ => {}
+                            }
                             if path == "/single-slow" && !request.headers().contains_key("range") {
                                 let stream = futures_util::stream::once(async move {
                                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -155,6 +253,9 @@ impl Fixture {
                                     | "/slow-range"
                                     | "/pipeline"
                                     | "/single-slow"
+                                    | "/trickle"
+                                    | "/unlucky"
+                                    | "/dies"
                             ) {
                                 if let Some(range) =
                                     request.headers().get("range").and_then(|v| v.to_str().ok())
@@ -261,6 +362,370 @@ impl Fixture {
             .body(Full::new(Bytes::new()))
             .unwrap()
     }
+}
+static UNLUCKY: AtomicU64 = AtomicU64::new(0);
+async fn rescue_fixture() -> Result<Fixture> {
+    let f = Fixture::new().await?;
+    {
+        let mut options = f.state.options.write().unwrap();
+        options.segmented_downloads = false;
+        options.flow_rescue = true;
+    }
+    Ok(f)
+}
+fn rescue_count(f: &Fixture, field: &str) -> u64 {
+    f.state.rescue.snapshot()[field].as_u64().unwrap()
+}
+#[tokio::test]
+async fn slow_download_moves_to_new_connections_with_identical_bytes() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut client = f.client().await?;
+    let start = Instant::now();
+    let response = client.send_request(Fixture::request("/trickle")).await?;
+    assert_eq!(response.headers()["content-length"], "5242880");
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    // At the original speed this would take over five minutes.
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(rescue_count(&f, "triggered"), 1);
+    assert_eq!(rescue_count(&f, "completed"), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn unlucky_replacement_connections_are_dropped_and_replaced() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/unlucky")).await?;
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert_eq!(rescue_count(&f, "completed"), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn upstream_dying_mid_file_is_resumed_without_the_client_noticing() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/dies")).await?;
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert_eq!(rescue_count(&f, "completed"), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn server_refusing_range_still_delivers_over_the_original_get() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/no-range")).await?;
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert_eq!(rescue_count(&f, "triggered"), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn healthy_download_or_slow_client_opens_nothing_extra() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/large")).await?;
+    let mut body = response.into_body();
+    let mut received = BytesMut::new();
+    // A client that stops reading must not look like a slow upstream.
+    received.extend_from_slice(body.frame().await.unwrap()?.data_ref().unwrap());
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    received.extend_from_slice(&body.collect().await?.to_bytes());
+    assert_eq!(received.freeze(), f.data);
+    assert_eq!(rescue_count(&f, "triggered"), 0);
+    assert_eq!(f.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(f.connections.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn wrong_edge_refusal_cools_the_route_but_a_real_error_does_not() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let host = "github.com";
+    let route = f.state.routes.lock().await["raw.githubusercontent.com"]
+        .route
+        .clone();
+    f.state.cache_route(host, route.clone()).await;
+    let socket = TcpStream::connect(f.addr).await?;
+    let stream = f.tls.connect(host, socket).await?;
+    let (mut client, conn) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream)).await?;
+    tokio::spawn(conn);
+    // A POST is never replayed, so the reply stays visible and no other address is tried.
+    let post = |path: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("https://github.com{path}"))
+            .body(Full::new(Bytes::from_static(b"x")))
+            .unwrap()
+    };
+    let response = client.send_request(post("/real-refusal")).await?;
+    assert_eq!(response.status(), 400);
+    let _ = response.into_body().collect().await?;
+    assert!(!f.state.health.bad(host, &route));
+    let response = client.send_request(post("/wrong-edge")).await?;
+    assert_eq!(response.status(), 400);
+    let _ = response.into_body().collect().await?;
+    assert!(f.state.health.bad(host, &route));
+    assert!(
+        f.state.select("github.com").await.ok().as_ref() != Some(&route),
+        "the refused route must not be served again from the cache"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn prewarmed_connection_serves_the_first_request() -> Result<()> {
+    let f = rescue_fixture().await?;
+    f.state.options.write().unwrap().flow_rescue = false;
+    let host = "raw.githubusercontent.com";
+    prewarm::connect_for_test(&f.state, host).await;
+    prewarm::connect_for_test(&f.state, host).await;
+    let snapshot = f.state.prewarm.snapshot();
+    assert_eq!(snapshot["opened"], 1, "a second pass must not open another");
+    assert_eq!(f.connections.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        f.requests.load(Ordering::Relaxed),
+        0,
+        "nothing is sent early"
+    );
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/no-range")).await?;
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert_eq!(f.connections.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn failed_prewarm_leaves_no_cooldown_behind() -> Result<()> {
+    let f = Fixture::new().await?;
+    let host = "raw.githubusercontent.com";
+    let closed = TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
+    let route = Route::Direct(closed);
+    f.state.cache_route(host, route.clone()).await;
+    prewarm::connect_for_test(&f.state, host).await;
+    assert_eq!(f.state.prewarm.snapshot()["failed"], 1);
+    assert!(!f.state.health.bad(host, &route));
+    Ok(())
+}
+/// A second upstream that answers every request at full speed with `content`,
+/// recording each request body it receives.
+async fn fast_backend(
+    f: &Fixture,
+    content: Bytes,
+) -> Result<(
+    SocketAddr,
+    Arc<std::sync::Mutex<Vec<Bytes>>>,
+    tokio::task::JoinHandle<()>,
+)> {
+    let accept = transparent::acceptor(&f.state.config.transparent)?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let (accept, content, seen) = (accept.clone(), content.clone(), seen.clone());
+            tokio::spawn(async move {
+                let Ok(stream) = accept.accept(socket).await else {
+                    return;
+                };
+                let service = service_fn(move |request: Request<Incoming>| {
+                    let (content, seen) = (content.clone(), seen.clone());
+                    async move {
+                        let body = request.into_body().collect().await.unwrap().to_bytes();
+                        seen.lock().unwrap().push(body);
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(content)))
+                    }
+                });
+                let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    Ok((addr, bodies, task))
+}
+fn race_count(f: &Fixture, field: &str) -> u64 {
+    f.state.race.snapshot()[field].as_u64().unwrap()
+}
+#[tokio::test]
+async fn git_race_keeps_the_faster_connection_and_its_exact_bytes() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let host = "github.com";
+    let slow = f.state.routes.lock().await["raw.githubusercontent.com"]
+        .route
+        .clone();
+    let (fast, bodies, task) = fast_backend(&f, f.data.clone()).await?;
+    let uri: hyper::Uri = "/slow.git/git-upload-pack".parse()?;
+    let request =
+        Bytes::from_static(b"0032want 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d\n00000009done\n");
+    let start = Instant::now();
+    // The usual choice trickles forever; the other address is fast.
+    let outcome = race::contest(
+        &f.state,
+        host,
+        vec![slow, Route::Direct(fast)],
+        &uri,
+        &hyper::HeaderMap::new(),
+        request.clone(),
+    )
+    .await;
+    let race::Outcome::Kept { response, lease } = outcome else {
+        panic!("the race should keep a reply");
+    };
+    assert_eq!(lease.route(), &Route::Direct(fast));
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(bodies.lock().unwrap().as_slice(), [request]);
+    assert_eq!(race_count(&f, "kept_other"), 1);
+    assert_eq!(race_count(&f, "kept_first"), 0);
+    task.abort();
+    Ok(())
+}
+#[tokio::test]
+async fn git_race_falls_back_to_the_survivor_when_one_address_is_dead() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let dead = TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
+    let small = Bytes::from_static(b"0008NAK\n0000");
+    let (fast, _, task) = fast_backend(&f, small.clone()).await?;
+    let uri: hyper::Uri = "/repo.git/git-upload-pack".parse()?;
+    let outcome = race::contest(
+        &f.state,
+        "github.com",
+        vec![Route::Direct(dead), Route::Direct(fast)],
+        &uri,
+        &hyper::HeaderMap::new(),
+        Bytes::from_static(b"0000"),
+    )
+    .await;
+    let race::Outcome::Kept { response, .. } = outcome else {
+        panic!("the live address should win");
+    };
+    // A reply shorter than the decision size wins as soon as it is complete.
+    assert_eq!(response.into_body().collect().await?.to_bytes(), small);
+    task.abort();
+    Ok(())
+}
+#[tokio::test]
+async fn git_race_is_off_by_default_and_only_for_small_upload_pack_posts() -> Result<()> {
+    let f = rescue_fixture().await?;
+    let mut headers = hyper::HeaderMap::new();
+    assert!(race::wants_objects(&headers, b"0011command=fetch0001000dthin-pack0032want 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d\n0009done\n0000"));
+    assert!(!race::wants_objects(
+        &headers,
+        b"0014command=ls-refs\n0001000bsymrefs0000"
+    ));
+    headers.insert("content-encoding", "gzip".parse()?);
+    assert!(race::wants_objects(&headers, b"\x1f\x8b"));
+    headers.remove("content-encoding");
+    headers.insert("content-length", "120".parse()?);
+    let path = "/a/b.git/git-upload-pack";
+    let post = hyper::Method::POST;
+    assert!(!race::eligible(
+        &f.state,
+        "github.com",
+        &post,
+        path,
+        &headers
+    ));
+    f.state.options.write().unwrap().git_race = true;
+    assert!(race::eligible(
+        &f.state,
+        "github.com",
+        &post,
+        path,
+        &headers
+    ));
+    assert!(!race::eligible(
+        &f.state,
+        "github.com",
+        &hyper::Method::GET,
+        path,
+        &headers
+    ));
+    assert!(!race::eligible(
+        &f.state,
+        "github.com",
+        &post,
+        "/a/b.git/git-receive-pack",
+        &headers
+    ));
+    assert!(!race::eligible(
+        &f.state,
+        "api.github.com",
+        &post,
+        path,
+        &headers
+    ));
+    headers.insert(
+        "content-length",
+        (race::MAX_REQUEST + 1).to_string().parse()?,
+    );
+    assert!(!race::eligible(
+        &f.state,
+        "github.com",
+        &post,
+        path,
+        &headers
+    ));
+    headers.remove("content-length");
+    assert!(
+        !race::eligible(&f.state, "github.com", &post, path, &headers),
+        "chunked bodies are not buffered"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn disabling_rescue_leaves_a_plain_stream() -> Result<()> {
+    let f = rescue_fixture().await?;
+    f.state.options.write().unwrap().flow_rescue = false;
+    let mut client = f.client().await?;
+    let response = client.send_request(Fixture::request("/no-range")).await?;
+    assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
+    assert_eq!(rescue_count(&f, "triggered"), 0);
+    assert_eq!(f.requests.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn concurrent_downloads_get_separate_connections() -> Result<()> {
+    let f = rescue_fixture().await?;
+    f.state.options.write().unwrap().flow_rescue = false;
+    let host = "raw.githubusercontent.com";
+    let route = f.state.routes.lock().await[host].route.clone();
+    f.state.cache_route_for(host, Traffic::Bulk, route).await;
+    let mut client = f.client().await?;
+    let path = "/slow.git/git-upload-pack";
+    let first = client.send_request(Fixture::request(path)).await?;
+    let second = client.send_request(Fixture::request(path)).await?;
+    let pools = f.state.pool.snapshot().await;
+    let bulk = pools["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["profile"] == "bulk")
+        .count();
+    assert_eq!(bulk, 2);
+    drop((first, second));
+    Ok(())
+}
+#[tokio::test]
+async fn connection_of_a_slow_cancelled_download_is_not_reused() -> Result<()> {
+    let f = rescue_fixture().await?;
+    f.state.options.write().unwrap().flow_rescue = false;
+    let host = "raw.githubusercontent.com";
+    let route = f.state.routes.lock().await[host].route.clone();
+    f.state.cache_route_for(host, Traffic::Bulk, route).await;
+    let mut client = f.client().await?;
+    let path = "/slow.git/git-upload-pack";
+    let mut response = client.send_request(Fixture::request(path)).await?;
+    let until = Instant::now() + Duration::from_millis(2300);
+    while Instant::now() < until {
+        response.frame().await.unwrap()?;
+    }
+    drop(response);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = f.connections.load(Ordering::Relaxed);
+    let again = client.send_request(Fixture::request(path)).await?;
+    assert_eq!(f.connections.load(Ordering::Relaxed), before + 1);
+    // Cancellation says nothing about the address: it must not be blacklisted.
+    assert_eq!(f.state.performance.snapshot().as_array().unwrap().len(), 0);
+    drop(again);
+    Ok(())
 }
 #[tokio::test]
 async fn bulk_keeps_dns_preference_while_web_chooses_first_verified_tls() -> Result<()> {

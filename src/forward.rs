@@ -27,17 +27,34 @@ struct Transfer {
     route: Route,
     start: Instant,
     bytes: u64,
+    // Only complete 200 responses say anything about a route. Every transfer
+    // still says something about the connection that carried it.
+    learn: bool,
 }
 impl CountedBody {
+    fn retire_if_slow(&self, transfer: &Transfer) {
+        if routing::slow_flow(transfer.bytes, transfer.start.elapsed()) {
+            if let Some(lease) = &self.lease {
+                lease.retire();
+            }
+        }
+    }
     fn finish_transfer(&mut self, complete: bool) {
         if let Some(t) = self.observation.take() {
-            self.state
-                .performance
-                .record(&t.host, &t.route, t.bytes, t.start.elapsed(), complete);
-            if !complete {
-                self.state
-                    .health
-                    .fail(&t.host, &t.route, health::Failure::Network);
+            self.retire_if_slow(&t);
+            if t.learn {
+                self.state.performance.record(
+                    &t.host,
+                    &t.route,
+                    t.bytes,
+                    t.start.elapsed(),
+                    complete,
+                );
+                if !complete {
+                    self.state
+                        .health
+                        .fail(&t.host, &t.route, health::Failure::Network);
+                }
             }
         }
     }
@@ -54,6 +71,10 @@ impl Drop for CountedBody {
                     write.buffer.freeze(),
                 );
             }
+        } else if let Some(transfer) = self.observation.take() {
+            // The client gave up. That teaches nothing about the route, but a
+            // slow connection must not be handed to its retry.
+            self.retire_if_slow(&transfer);
         }
     }
 }
@@ -286,7 +307,70 @@ async fn forward(
     *request.uri_mut() = uri.clone();
     let headers = request.headers().clone();
     let (parts, body) = request.into_parts();
-    let body = if no_body {
+    let body = if race::eligible(state, host, &method, uri.path(), &headers) {
+        let bytes = http_body_util::Limited::new(body, race::MAX_REQUEST as usize)
+            .collect()
+            .await?
+            .to_bytes();
+        state
+            .counters
+            .uploaded
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        match race::upload_pack(state, host, &uri, &headers, bytes.clone()).await {
+            race::Outcome::Kept {
+                mut response,
+                lease,
+            } => {
+                strip_hop(response.headers_mut(), false);
+                response
+                    .headers_mut()
+                    .insert("x-github-turbo-upstream", lease.protocol().parse()?);
+                response
+                    .headers_mut()
+                    .insert("x-github-turbo-race", "kept".parse()?);
+                let transfer = Transfer {
+                    host: host.into(),
+                    route: lease.route().clone(),
+                    start: Instant::now(),
+                    bytes: 0,
+                    learn: state.optimization().adaptive_routing,
+                };
+                return Ok(response.map(|body| {
+                    CountedBody {
+                        inner: body,
+                        state: state.clone(),
+                        upload: false,
+                        lease: Some(lease),
+                        cache: None,
+                        observation: Some(transfer),
+                    }
+                    .boxed_unsync()
+                }));
+            }
+            race::Outcome::Refused {
+                mut response,
+                lease,
+            } => {
+                strip_hop(response.headers_mut(), false);
+                return Ok(response.map(|body| {
+                    CountedBody {
+                        inner: body.map_err(Into::into).boxed_unsync(),
+                        state: state.clone(),
+                        upload: false,
+                        lease: Some(lease),
+                        cache: None,
+                        observation: None,
+                    }
+                    .boxed_unsync()
+                }));
+            }
+            // Every raced connection failed: one ordinary attempt with the
+            // buffered body, over whatever route is now judged best.
+            race::Outcome::NotStarted | race::Outcome::Failed => Full::new(bytes)
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        }
+    } else if no_body {
         empty()
     } else {
         CountedBody {
@@ -345,7 +429,9 @@ async fn forward(
                 let lease = exchange.lease;
                 let actual = lease.route().clone();
                 let status = response.status();
-                if status == StatusCode::MISDIRECTED_REQUEST {
+                let misdirected = status == StatusCode::MISDIRECTED_REQUEST
+                    || routing::wrong_edge(host, status.as_u16(), response.headers());
+                if misdirected {
                     state.health.fail(host, &actual, health::Failure::Rejected);
                 } else if status == StatusCode::TOO_MANY_REQUESTS {
                     state.health.fail(host, &actual, health::Failure::Throttled);
@@ -360,9 +446,7 @@ async fn forward(
                         state.cache_route_for(host, traffic, actual.clone()).await;
                     }
                 }
-                if (status.is_server_error() || status == StatusCode::MISDIRECTED_REQUEST)
-                    && replayable
-                {
+                if (status.is_server_error() || misdirected) && replayable {
                     if host == "github.com"
                         && !api_tried
                         && method == Method::GET
@@ -433,7 +517,18 @@ async fn forward(
                         .headers_mut()
                         .insert("x-github-turbo-split", "fallback".parse()?);
                 }
-                let cache = if state.optimization().public_cache
+                let rescue = if !state.optimization().segmented_downloads
+                    && state.optimization().flow_rescue
+                    && !matches!(actual, Route::Proxy)
+                    && method == Method::GET
+                    && status == StatusCode::OK
+                {
+                    segmented::eligible(host, response.headers(), &headers)
+                } else {
+                    None
+                };
+                let cache = if rescue.is_none()
+                    && state.optimization().public_cache
                     && content_cache::Cache::eligible(status, response.headers())
                 {
                     cache_key.as_ref().and_then(|key| {
@@ -459,6 +554,28 @@ async fn forward(
                 response
                     .headers_mut()
                     .insert("x-github-turbo-cache", "miss".parse()?);
+                if let Some((total, etag)) = rescue {
+                    let download = rescue::Download {
+                        state: state.clone(),
+                        host: host.into(),
+                        uri: uri.clone(),
+                        headers: headers.clone(),
+                        etag,
+                        total,
+                        route: actual.clone(),
+                    };
+                    return Ok(response.map(|body| {
+                        CountedBody {
+                            inner: rescue::start(download, body, lease),
+                            state: state.clone(),
+                            upload: false,
+                            lease: None,
+                            cache: None,
+                            observation: None,
+                        }
+                        .boxed_unsync()
+                    }));
+                }
                 return Ok(response.map(|body| {
                     CountedBody {
                         inner: body,
@@ -466,9 +583,8 @@ async fn forward(
                         upload: false,
                         lease: Some(lease),
                         cache,
-                        observation: if state.optimization().adaptive_routing
-                            && Traffic::classify(host, uri.path()) == Traffic::Bulk
-                            && status == StatusCode::OK
+                        observation: if Traffic::classify(host, uri.path()) == Traffic::Bulk
+                            && matches!(status, StatusCode::OK | StatusCode::PARTIAL_CONTENT)
                             && method != Method::HEAD
                         {
                             Some(Transfer {
@@ -476,6 +592,8 @@ async fn forward(
                                 route: actual.clone(),
                                 start: Instant::now(),
                                 bytes: 0,
+                                learn: state.optimization().adaptive_routing
+                                    && status == StatusCode::OK,
                             })
                         } else {
                             None

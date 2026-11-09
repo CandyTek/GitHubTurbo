@@ -3,6 +3,10 @@ use crate::forward::HttpBody;
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::sync::Notify;
+// Web pages pay a TLS handshake for every reconnect, so hold those connections
+// through a pause in browsing. Download connections are cheap to replace.
+const LATENCY_IDLE: Duration = Duration::from_secs(300);
+const BULK_IDLE: Duration = Duration::from_secs(90);
 enum Sender {
     H1(Mutex<hyper::client::conn::http1::SendRequest<HttpBody>>),
     H2(hyper::client::conn::http2::SendRequest<HttpBody>),
@@ -13,9 +17,15 @@ struct Channel {
     route: Route,
     active: AtomicU64,
     last: std::sync::Mutex<Instant>,
+    idle_limit: Duration,
     closed: Arc<std::sync::atomic::AtomicBool>,
     driver: tokio::task::AbortHandle,
     notify: Arc<Notify>,
+}
+impl Channel {
+    fn expired(&self) -> bool {
+        self.last.lock().unwrap().elapsed() >= self.idle_limit
+    }
 }
 impl Drop for Channel {
     fn drop(&mut self) {
@@ -31,6 +41,41 @@ impl Lease {
         match self.0.sender {
             Sender::H1(_) => "http/1.1",
             Sender::H2(_) => "h2",
+        }
+    }
+    /// Stop offering this connection to new requests. Its current streams finish.
+    pub fn retire(&self) {
+        self.0.closed.store(true, Ordering::Relaxed);
+        self.0.notify.notify_one();
+    }
+    pub fn is_closed(&self) -> bool {
+        self.0.closed.load(Ordering::Relaxed)
+    }
+    pub async fn request(
+        &self,
+        host: &str,
+        mut request: Request<HttpBody>,
+    ) -> Result<Response<Incoming>> {
+        match &self.0.sender {
+            Sender::H1(sender) => {
+                let mut sender = sender.lock().await;
+                sender.ready().await?;
+                Ok(sender.send_request(request).await?)
+            }
+            Sender::H2(sender) => {
+                let mut sender = sender.clone();
+                let path = request
+                    .uri()
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/");
+                *request.uri_mut() = format!("https://{host}{path}")
+                    .parse()
+                    .map_err(|_| err("invalid upstream URI"))?;
+                *request.version_mut() = hyper::Version::HTTP_2;
+                sender.ready().await?;
+                Ok(sender.send_request(request).await?)
+            }
         }
     }
 }
@@ -54,6 +99,10 @@ impl Default for HostPool {
             notify: Arc::new(Notify::new()),
         }
     }
+}
+struct Shape {
+    force_http1: bool,
+    traffic: Traffic,
 }
 pub struct Pool {
     capacity: Arc<Semaphore>,
@@ -116,8 +165,7 @@ impl Pool {
         channels.retain(|c| {
             !c.closed.load(Ordering::Relaxed)
                 && (c.active.load(Ordering::Relaxed) > 0
-                    || (c.last.lock().unwrap().elapsed() < Duration::from_secs(90)
-                        && !state.health.bad(host, &c.route)))
+                    || (!c.expired() && !state.health.bad(host, &c.route)))
         });
         let channel = channels
             .iter()
@@ -161,16 +209,19 @@ impl Pool {
             None
         };
         let route = route.or(selected_bulk.as_ref());
+        // Give each download its own TCP connection while there is room: on one
+        // shared connection they would all inherit that connection's speed.
+        let exclusive = independent || traffic == Traffic::Bulk;
         loop {
             let notified = pool.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(lease) = Self::pick(&pool, state, host, route, independent) {
+            if let Some(lease) = Self::pick(&pool, state, host, route, exclusive) {
                 self.reused.fetch_add(1, Ordering::Relaxed);
                 return Ok(lease);
             }
             let guard = pool.build.lock().await;
-            if let Some(lease) = Self::pick(&pool, state, host, route, independent) {
+            if let Some(lease) = Self::pick(&pool, state, host, route, exclusive) {
                 self.reused.fetch_add(1, Ordering::Relaxed);
                 return Ok(lease);
             }
@@ -202,7 +253,10 @@ impl Pool {
                         selected.clone(),
                         pool.notify.clone(),
                         capacity.unwrap(),
-                        false,
+                        Shape {
+                            force_http1: false,
+                            traffic,
+                        },
                     )
                     .await
                 {
@@ -241,8 +295,12 @@ impl Pool {
         route: Route,
         notify: Arc<Notify>,
         capacity: tokio::sync::OwnedSemaphorePermit,
-        force_http1: bool,
+        shape: Shape,
     ) -> Result<Channel> {
+        let Shape {
+            force_http1,
+            traffic,
+        } = shape;
         let h2 = state.optimization().http2 && !force_http1;
         let warm = if state.optimization().probe_reuse {
             state.warm.take(host, &route, h2).await
@@ -273,7 +331,7 @@ impl Pool {
                 .timer(TokioTimer::new())
                 .keep_alive_interval(Some(Duration::from_secs(30)))
                 .keep_alive_timeout(Duration::from_secs(5))
-                .keep_alive_while_idle(false)
+                .keep_alive_while_idle(traffic == Traffic::Latency)
                 .initial_stream_window_size(1024 * 1024)
                 .initial_connection_window_size(4 * 1024 * 1024)
                 .max_send_buf_size(256 * 1024);
@@ -304,20 +362,76 @@ impl Pool {
             route,
             active: AtomicU64::new(0),
             last: std::sync::Mutex::new(Instant::now()),
+            idle_limit: if traffic == Traffic::Latency {
+                LATENCY_IDLE
+            } else {
+                BULK_IDLE
+            },
             closed,
             driver,
             notify,
         })
     }
+    /// A new connection owned by the caller, outside the shared pools. Dropping
+    /// the lease closes it, so a slow connection can never be handed out again.
+    pub async fn flow(&self, state: &State, host: &str, route: &Route) -> Result<Lease> {
+        let capacity = timeout(
+            Duration::from_secs(3),
+            self.capacity.clone().acquire_owned(),
+        )
+        .await??;
+        let channel = self
+            .build(
+                state,
+                host,
+                route.clone(),
+                Arc::new(Notify::new()),
+                capacity,
+                Shape {
+                    force_http1: false,
+                    traffic: Traffic::Bulk,
+                },
+            )
+            .await?;
+        channel.active.store(1, Ordering::Relaxed);
+        self.created.fetch_add(1, Ordering::Relaxed);
+        if matches!(channel.sender, Sender::H2(_)) {
+            self.h2_created.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Lease(Arc::new(channel)))
+    }
+    /// Have a connection ready for web traffic to `host`. Returns whether a new one
+    /// was opened. An existing one is left alone so its idle time keeps counting.
+    pub async fn prewarm(&self, state: &Arc<State>, host: &str) -> Result<bool> {
+        let ready = {
+            let hosts = self.hosts.lock().await;
+            hosts.get(&Traffic::Latency.key(host)).is_some_and(|pool| {
+                pool.channels
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|c| !c.closed.load(Ordering::Relaxed) && !c.expired())
+            })
+        };
+        if ready {
+            return Ok(false);
+        }
+        self.acquire(state, host, None, false, Traffic::Latency)
+            .await?;
+        Ok(true)
+    }
     pub async fn send(
         &self,
         state: &Arc<State>,
         host: &str,
-        mut request: Request<HttpBody>,
+        request: Request<HttpBody>,
         route: Option<&Route>,
         budget: Option<Duration>,
     ) -> Result<Exchange> {
         let traffic = Traffic::classify(host, request.uri().path());
+        if traffic == Traffic::Latency {
+            state.prewarm.touch(host);
+        }
         let independent = request.extensions().get::<IndependentRange>().is_some();
         // Classic WebSocket upgrades need their own HTTP/1.1 connection. An h2
         // channel cannot carry an HTTP/1.1 Upgrade or become an exclusive tunnel.
@@ -338,7 +452,10 @@ impl Pool {
                     selected,
                     Arc::new(Notify::new()),
                     capacity,
-                    true,
+                    Shape {
+                        force_http1: true,
+                        traffic,
+                    },
                 )
                 .await?;
             channel.active.store(1, Ordering::Relaxed);
@@ -348,30 +465,7 @@ impl Pool {
             self.acquire(state, host, route, independent, traffic)
                 .await?
         };
-        let work = async {
-            match &lease.0.sender {
-                Sender::H1(sender) => {
-                    let mut sender = sender.lock().await;
-                    sender.ready().await?;
-                    sender.send_request(request).await
-                }
-                Sender::H2(sender) => {
-                    let mut sender = sender.clone();
-                    let path = request
-                        .uri()
-                        .path_and_query()
-                        .map(|p| p.as_str())
-                        .unwrap_or("/");
-                    *request.uri_mut() = format!("https://{host}{path}")
-                        .parse()
-                        .map_err(|_| err("invalid upstream URI"))?;
-                    *request.version_mut() = hyper::Version::HTTP_2;
-                    sender.ready().await?;
-                    sender.send_request(request).await
-                }
-            }
-            .map_err(Into::into)
-        };
+        let work = lease.request(host, request);
         let response: Result<_> = if let Some(budget) = budget {
             match timeout(budget, work).await {
                 Ok(result) => result,
@@ -404,8 +498,7 @@ impl Pool {
         hosts.retain(|_, pool| {
             pool.channels.lock().unwrap().retain(|c| {
                 c.active.load(Ordering::Relaxed) > 0
-                    || (!c.closed.load(Ordering::Relaxed)
-                        && c.last.lock().unwrap().elapsed() < Duration::from_secs(90))
+                    || (!c.closed.load(Ordering::Relaxed) && !c.expired())
             });
             Arc::strong_count(pool) > 1 || !pool.channels.lock().unwrap().is_empty()
         });

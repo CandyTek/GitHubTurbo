@@ -29,6 +29,14 @@ impl Traffic {
         }
     }
 }
+/// Below this a download connection is not worth keeping. Speed on one network
+/// differs by 40x between connections to the same IP, so this judges the
+/// connection only and says nothing about the address it reached.
+pub const SLOW_FLOW_BYTES_PER_SECOND: f64 = 512. * 1024.;
+pub fn slow_flow(bytes: u64, elapsed: Duration) -> bool {
+    elapsed >= Duration::from_secs(2)
+        && (bytes as f64 / elapsed.as_secs_f64()) < SLOW_FLOW_BYTES_PER_SECOND
+}
 struct Sample {
     rate: f64,
     bytes: u64,
@@ -133,6 +141,23 @@ pub fn spread<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
         .map(|i| items[i * (items.len() - 1) / (limit - 1)].clone())
         .collect()
 }
+/// Some GitHub addresses complete TLS with a valid certificate for these hosts but
+/// serve something else, and refuse the request with a bare 400 or 403. Every real
+/// answer from these hosts carries a request ID, even an error from their cache layer.
+pub fn wrong_edge(host: &str, status: u16, headers: &hyper::HeaderMap) -> bool {
+    matches!(host, "github.com" | "api.github.com")
+        && matches!(status, 400 | 403)
+        && !headers.contains_key("x-github-request-id")
+}
+/// While IPv6 does not work (see `ipv6.rs`) those addresses can only fail, wasting
+/// probe slots and delaying the IPv4 candidates queued behind them. An IPv6-only
+/// list becomes empty, so the caller moves on to other sources or the upstream.
+pub fn reachable(addresses: Vec<SocketAddr>, ipv6: bool) -> Vec<SocketAddr> {
+    if ipv6 {
+        return addresses;
+    }
+    addresses.into_iter().filter(SocketAddr::is_ipv4).collect()
+}
 pub fn probe_delay(index: usize, ordered: bool, no_sni: bool) -> Duration {
     Duration::from_millis(
         (if ordered { index as u64 * 150 } else { 0 }) + if no_sni { 250 } else { 0 },
@@ -141,6 +166,25 @@ pub fn probe_delay(index: usize, ordered: bool, no_sni: bool) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wrong_edge_needs_a_covered_host_a_refusal_and_no_request_id() {
+        let bare = hyper::HeaderMap::new();
+        let mut real = hyper::HeaderMap::new();
+        real.insert("x-github-request-id", "8CA1:415C2".parse().unwrap());
+        assert!(wrong_edge("github.com", 400, &bare));
+        assert!(wrong_edge("api.github.com", 403, &bare));
+        assert!(!wrong_edge("github.com", 400, &real));
+        assert!(!wrong_edge("github.com", 404, &bare));
+        assert!(!wrong_edge("github.githubassets.com", 403, &bare));
+    }
+    #[test]
+    fn unusable_ipv6_is_always_dropped() {
+        let v4: SocketAddr = "140.82.112.3:443".parse().unwrap();
+        let v6: SocketAddr = "[2606:50c0:8000::154]:443".parse().unwrap();
+        assert_eq!(reachable(vec![v6, v4], false), [v4]);
+        assert_eq!(reachable(vec![v6, v4], true), [v6, v4]);
+        assert!(reachable(vec![v6], false).is_empty());
+    }
     #[test]
     fn profiles_and_whole_transfer_learning() {
         assert_eq!(Traffic::classify("github.com", "/a/b"), Traffic::Latency);
@@ -183,6 +227,9 @@ mod tests {
             ),
             Some(b)
         );
+        assert!(!slow_flow(1024, Duration::from_secs(1)), "too early to say");
+        assert!(slow_flow(1024 * 1024, Duration::from_secs(3)));
+        assert!(!slow_flow(8 * 1024 * 1024, Duration::from_secs(3)));
         assert_eq!(spread(&(0..12).collect::<Vec<_>>(), 8).last(), Some(&11));
         assert_eq!(probe_delay(1, false, false), Duration::ZERO);
         assert_eq!(probe_delay(1, true, false), Duration::from_millis(150));

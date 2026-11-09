@@ -80,7 +80,6 @@
   {
     "ip": "20.27.177.114",
     "hosts": [
-      "github.com",
       "codeload.github.com"
     ]
   },
@@ -98,18 +97,6 @@
   },
   {
     "ip": "20.205.243.166",
-    "hosts": [
-      "github.com"
-    ]
-  },
-  {
-    "ip": "20.205.243.167",
-    "hosts": [
-      "github.com"
-    ]
-  },
-  {
-    "ip": "20.205.243.168",
     "hosts": [
       "github.com"
     ]
