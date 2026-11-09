@@ -1,11 +1,13 @@
 """Black-box checks for the running loopback management API; restores options."""
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 import pathlib
 import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+VERSION = re.search(r'^version = "([^"]+)"', (ROOT/'Cargo.toml').read_text(), re.M).group(1)
 BASE = 'http://127.0.0.1:18080'
 client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -51,7 +53,7 @@ finally:
     assert status()['optimization'] == before
 assert request('/api/cache/clear', 'POST', marker)[0] == 200
 code, body = request('/api/diagnostics')
-assert code == 200 and json.loads(body)['version'] == '0.3.0'
+assert code == 200 and json.loads(body)['version'] == VERSION
 checks['options_restored'] = 'passed'
-(ROOT/'reports/control-0.3.json').write_text(json.dumps(checks, indent=2), encoding='utf-8')
+(ROOT/('reports/control-'+VERSION+'.json')).write_text(json.dumps(checks, indent=2), encoding='utf-8')
 print(json.dumps(checks))

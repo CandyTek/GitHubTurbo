@@ -1,4 +1,4 @@
-param([ValidateSet('enable','disable','recover','watch')][string]$Action = 'enable', [int]$OwnerPid = 0, [switch]$NoBrowser)
+﻿param([ValidateSet('enable','disable','recover','watch')][string]$Action = 'enable', [int]$OwnerPid = 0, [switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $base = Split-Path -Parent $MyInvocation.MyCommand.Path
 $exe = Join-Path $base 'github-turbo.exe'
@@ -144,7 +144,7 @@ try {
         $ready = $false
         for ($attempt=0; $attempt -lt 30; $attempt++) {
             if ($engine.HasExited) { throw 'Engine exited; see state/engine.log' }
-            try { $status = Invoke-RestMethod -Uri "http://$($cfg.listen)/status" -TimeoutSec 1; if ($status.version -like '0.3.*') { $ready=$true; break } } catch {}
+            try { $status = Invoke-RestMethod -Uri "http://$($cfg.listen)/status" -TimeoutSec 1; if ($status.version -like '0.5.*') { $ready=$true; break } } catch {}
             Start-Sleep -Milliseconds 100
         }
         if (!$ready) { throw 'Engine did not become ready' }

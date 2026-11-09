@@ -19,10 +19,14 @@ use tokio::{
 use tokio_native_tls::{native_tls, TlsConnector};
 mod content_cache;
 mod control;
+mod download;
 mod forward;
 mod health;
 mod pool;
 mod resolver;
+mod routing;
+mod sources;
+use routing::Traffic;
 mod seeds;
 mod segmented;
 mod transparent;
@@ -30,6 +34,7 @@ mod transparent;
 mod transport_tests;
 #[cfg(windows)]
 mod tray;
+mod warm;
 mod watchdog;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -82,14 +87,26 @@ struct Optimization {
     public_cache: bool,
     segmented_downloads: bool,
     seed_routes: bool,
+    range_memo: bool,
+    probe_reuse: bool,
+    range_pipeline: bool,
+    adaptive_split: bool,
+    host_sources: bool,
+    adaptive_routing: bool,
 }
 impl Default for Optimization {
     fn default() -> Self {
         Self {
             http2: true,
             public_cache: true,
-            segmented_downloads: true,
+            segmented_downloads: false,
             seed_routes: true,
+            range_memo: true,
+            probe_reuse: true,
+            range_pipeline: false,
+            adaptive_split: true,
+            host_sources: true,
+            adaptive_routing: true,
         }
     }
 }
@@ -142,6 +159,10 @@ struct State {
     config_file: std::sync::Mutex<Option<std::path::PathBuf>>,
     option_update: Mutex<()>,
     route_file: Mutex<()>,
+    download_memo: download::Memo,
+    warm: warm::Warm,
+    sources: sources::Sources,
+    performance: routing::Performance,
 }
 
 fn err(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
@@ -255,6 +276,10 @@ impl State {
             config_file: std::sync::Mutex::new(None),
             option_update: Mutex::new(()),
             route_file: Mutex::new(()),
+            download_memo: download::Memo::default(),
+            warm: warm::Warm::default(),
+            sources: sources::Sources::default(),
+            performance: routing::Performance::default(),
             tls: native_tls::TlsConnector::builder()
                 .request_alpns(&["http/1.1"])
                 .build()?
@@ -298,8 +323,10 @@ impl State {
                 .map(|ip| SocketAddr::new(ip, 443))
                 .collect()
         };
-        if self.optimization().seed_routes && !self.config.ip_overrides.contains_key(host) {
-            for address in seeds::for_host(host) {
+        if (self.optimization().seed_routes || self.optimization().host_sources)
+            && !self.config.ip_overrides.contains_key(host)
+        {
+            for address in self.fallback_addresses(host) {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -365,33 +392,108 @@ impl State {
             Ok(start.elapsed().as_millis())
         }).await?
     }
+    fn fallback_addresses(&self, host: &str) -> Vec<SocketAddr> {
+        let options = self.optimization();
+        let sources = if options.host_sources {
+            self.sources.candidates(host)
+        } else {
+            vec![]
+        };
+        let seeds = if options.seed_routes {
+            seeds::for_host(host)
+        } else {
+            vec![]
+        };
+        let groups = [routing::spread(&sources, 8), routing::spread(&seeds, 8)];
+        let mut out = Vec::new();
+        for n in 0..8 {
+            for group in &groups {
+                if let Some(address) = group.get(n) {
+                    if !out.contains(address) {
+                        out.push(*address);
+                    }
+                }
+            }
+        }
+        routing::spread(&out, 8)
+    }
     async fn best_direct(self: &Arc<Self>, host: &str) -> Result<Route> {
-        if self.config.ip_overrides.contains_key(host) || !self.optimization().seed_routes {
+        self.best_direct_for(host, Traffic::classify(host, "/"))
+            .await
+    }
+    async fn best_direct_for(self: &Arc<Self>, host: &str, traffic: Traffic) -> Result<Route> {
+        if self.config.ip_overrides.contains_key(host) {
             return self
                 .probe_addresses(host, self.addresses(host).await?)
                 .await;
         }
-        let mut seed = seeds::for_host(host);
-        seed.truncate(8);
-        let from_seed = self.probe_addresses(host, seed);
+        let bulk = traffic == Traffic::Bulk && self.optimization().adaptive_routing;
+        let fallback = self.fallback_addresses(host);
         let from_dns = async {
             let ips = self.resolver.resolve(host).await?;
+            let mut addresses: Vec<_> =
+                ips.into_iter().map(|ip| SocketAddr::new(ip, 443)).collect();
+            if bulk {
+                let mut all = addresses.clone();
+                all.extend(&fallback);
+                if let Some(route) = self.performance.preferred(host, &all) {
+                    if !self.health.bad(host, &route)
+                        && self.probe_candidate(host, &route).await.is_ok()
+                    {
+                        return Ok(route);
+                    }
+                }
+                let better: Vec<_> = addresses
+                    .iter()
+                    .copied()
+                    .filter(|a| !self.performance.slow(host, &Route::Direct(*a)))
+                    .collect();
+                if !better.is_empty() {
+                    addresses = better;
+                }
+            }
+            self.probe_addresses_for(host, addresses, bulk).await
+        };
+        if fallback.is_empty() {
+            return from_dns.await;
+        }
+        let from_fallback = async {
+            // Fresh DNS gets a head start; a fast TLS handshake alone does not
+            // justify replacing a CDN's current address with a legacy seed.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let better: Vec<_> = fallback
+                .iter()
+                .copied()
+                .filter(|a| !bulk || !self.performance.slow(host, &Route::Direct(*a)))
+                .collect();
             self.probe_addresses(
                 host,
-                ips.into_iter().map(|ip| SocketAddr::new(ip, 443)).collect(),
+                if better.is_empty() {
+                    fallback.clone()
+                } else {
+                    better
+                },
             )
             .await
         };
-        tokio::pin!(from_seed, from_dns);
-        tokio::select! {result=&mut from_seed=>match result{Ok(route)=>Ok(route),Err(_)=>from_dns.await},result=&mut from_dns=>match result{Ok(route)=>Ok(route),Err(_)=>from_seed.await}}
+        tokio::pin!(from_dns, from_fallback);
+        tokio::select! {result=&mut from_dns=>match result{Ok(route)=>Ok(route),Err(_)=>from_fallback.await},result=&mut from_fallback=>match result{Ok(route)=>Ok(route),Err(_)=>from_dns.await}}
     }
     async fn probe_addresses(
         self: &Arc<Self>,
         host: &str,
         addresses: Vec<SocketAddr>,
     ) -> Result<Route> {
+        self.probe_addresses_for(host, addresses, false).await
+    }
+    async fn probe_addresses_for(
+        self: &Arc<Self>,
+        host: &str,
+        addresses: Vec<SocketAddr>,
+        ordered: bool,
+    ) -> Result<Route> {
         let mut jobs = JoinSet::new();
-        for address in addresses.into_iter().take(8) {
+        for (index, address) in routing::spread(&addresses, 8).into_iter().enumerate() {
             for no_sni in [false, true] {
                 if no_sni
                     && (!self.config.transparent.enabled
@@ -410,8 +512,9 @@ impl State {
                 let state = self.clone();
                 let host = host.to_owned();
                 jobs.spawn(async move {
-                    if no_sni {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    let delay = routing::probe_delay(index, ordered, no_sni);
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
                     }
                     match state.probe_candidate(&host, &route).await {
                         Ok(()) => Ok(route),
@@ -430,6 +533,14 @@ impl State {
         }
         Err(err("all direct TLS/HTTP probes failed"))
     }
+    fn connector(&self, route: &Route, h2: bool) -> &TlsConnector {
+        match (h2, matches!(route, Route::DirectNoSni(_))) {
+            (true, true) => &self.tls_http_no_sni,
+            (true, false) => &self.tls_http,
+            (false, true) => &self.tls_no_sni,
+            (false, false) => &self.tls,
+        }
+    }
     async fn probe_candidate(&self, host: &str, route: &Route) -> Result<()> {
         if !self.config.transparent.enabled {
             return self.probe(host, route).await.map(|_| ());
@@ -438,44 +549,54 @@ impl State {
         // System mode evaluates the actual HTTP response in the forwarder.
         timeout(Duration::from_millis(self.config.probe_timeout_ms), async {
             let socket = self.dial(host, route).await?;
-            let connector = if matches!(route, Route::DirectNoSni(_)) {
-                &self.tls_no_sni
-            } else {
-                &self.tls
-            };
-            connector.connect(host, socket).await?;
+            let reuse = self.optimization().probe_reuse;
+            let h2 = reuse && self.optimization().http2;
+            let stream = self.connector(route, h2).connect(host, socket).await?;
+            if reuse {
+                self.warm.put(host, route.clone(), h2, stream).await;
+            }
             Ok(())
         })
         .await?
     }
     async fn select(self: &Arc<Self>, host: &str) -> Result<Route> {
+        self.select_for(host, Traffic::classify(host, "/")).await
+    }
+    async fn select_for(self: &Arc<Self>, host: &str, traffic: Traffic) -> Result<Route> {
+        let key = traffic.key(host);
         if self.config.mode_for(host) == Mode::Proxy {
             return Ok(Route::Proxy);
         }
-        if let Some(cached) = self.routes.lock().await.get(host) {
+        if let Some(cached) = self.routes.lock().await.get(&key) {
             if cached.at.elapsed().as_secs() < self.config.cache_seconds
                 && !self.health.bad(host, &cached.route)
+                && (traffic != Traffic::Bulk
+                    || !self.optimization().adaptive_routing
+                    || !self.performance.slow(host, &cached.route))
             {
                 return Ok(cached.route.clone());
             }
         }
         let lock = {
             let mut locks = self.locks.lock().await;
-            if !locks.contains_key(host) && locks.len() >= self.config.max_routes {
+            if !locks.contains_key(&key) && locks.len() >= self.config.max_routes {
                 locks.retain(|_, lock| Arc::strong_count(lock) > 1);
             }
-            if !locks.contains_key(host) && locks.len() >= self.config.max_routes {
+            if !locks.contains_key(&key) && locks.len() >= self.config.max_routes {
                 return Err(err("route probe capacity reached"));
             }
             locks
-                .entry(host.to_owned())
+                .entry(key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
         let _guard = lock.lock().await;
-        if let Some(cached) = self.routes.lock().await.get(host) {
+        if let Some(cached) = self.routes.lock().await.get(&key) {
             if cached.at.elapsed().as_secs() < self.config.cache_seconds
                 && !self.health.bad(host, &cached.route)
+                && (traffic != Traffic::Bulk
+                    || !self.optimization().adaptive_routing
+                    || !self.performance.slow(host, &cached.route))
             {
                 return Ok(cached.route.clone());
             }
@@ -483,9 +604,9 @@ impl State {
         let _permit = self.probes.acquire().await?;
         let route = if self.config.mode_for(host) == Mode::Direct || self.config.upstream.is_none()
         {
-            self.best_direct(host).await?
+            self.best_direct_for(host, traffic).await?
         } else {
-            let direct = self.best_direct(host);
+            let direct = self.best_direct_for(host, traffic);
             let proxy = self.probe(host, &Route::Proxy);
             tokio::pin!(direct, proxy);
             tokio::select! {
@@ -493,13 +614,18 @@ impl State {
                 result = &mut proxy => match result { Ok(_) => Route::Proxy, Err(_) => direct.await? },
             }
         };
-        self.cache_route(host, route.clone()).await;
+        self.cache_route_for(host, traffic, route.clone()).await;
         eprintln!("route {host}: {route:?}");
         Ok(route)
     }
     async fn cache_route(&self, host: &str, route: Route) {
+        self.cache_route_for(host, Traffic::classify(host, "/"), route)
+            .await;
+    }
+    async fn cache_route_for(&self, host: &str, traffic: Traffic, route: Route) {
+        let key = traffic.key(host);
         let mut cache = self.routes.lock().await;
-        if !cache.contains_key(host) && cache.len() >= self.config.max_routes {
+        if !cache.contains_key(&key) && cache.len() >= self.config.max_routes {
             if let Some(oldest) = cache
                 .iter()
                 .min_by_key(|(_, item)| item.at)
@@ -509,28 +635,45 @@ impl State {
             }
         }
         cache.insert(
-            host.to_owned(),
+            key,
             Cached {
                 route,
                 at: Instant::now(),
             },
         );
     }
-    async fn alternatives(&self, host: &str, current: Option<&Route>) -> Vec<Route> {
+    async fn alternatives(
+        &self,
+        host: &str,
+        current: Option<&Route>,
+        traffic: Traffic,
+    ) -> Vec<Route> {
         if self.config.mode_for(host) == Mode::Proxy {
             return vec![Route::Proxy];
         }
         let addresses = self.addresses(host).await.unwrap_or_default();
         let mut routes: Vec<_> = addresses.iter().copied().map(Route::Direct).collect();
         if self.config.transparent.enabled && self.config.transparent.try_without_sni {
-            routes.extend(addresses.into_iter().map(Route::DirectNoSni));
+            routes.extend(addresses.iter().copied().map(Route::DirectNoSni));
         }
         routes.retain(|route| Some(route) != current && !self.health.bad(host, route));
-        routes.sort_by(|a, b| {
-            self.health
-                .score(host, a)
-                .total_cmp(&self.health.score(host, b))
-        });
+        if traffic == Traffic::Bulk && self.optimization().adaptive_routing {
+            // Keep fresh DNS ahead of unmeasured hosts/seed entries. Latency is
+            // not a throughput score. Known slow transfers go to the back.
+            routes.sort_by_key(|r| self.performance.slow(host, r));
+            if let Some(preferred) = self.performance.preferred(host, &addresses) {
+                if let Some(index) = routes.iter().position(|r| r == &preferred) {
+                    let r = routes.remove(index);
+                    routes.insert(0, r);
+                }
+            }
+        } else {
+            routes.sort_by(|a, b| {
+                self.health
+                    .score(host, a)
+                    .total_cmp(&self.health.score(host, b))
+            });
+        }
         routes.truncate(4);
         if self.config.upstream.is_some() && self.config.mode_for(host) == Mode::Auto {
             routes.truncate(3);
@@ -547,14 +690,14 @@ impl State {
         let entries: Vec<_> = routes
             .iter()
             .filter(|(host, entry)| {
-                !matches!(entry.route, Route::Proxy) && !self.health.bad(host, &entry.route)
+                !host.starts_with("bulk:") && !matches!(entry.route, Route::Proxy) && !self.health.bad(host, &entry.route) && entry.at.elapsed().as_secs()<self.config.cache_seconds
             })
-            .map(|(host, entry)| serde_json::json!({"host":host,"route":entry.route}))
+            .map(|(host, entry)| serde_json::json!({"host":host,"route":entry.route,"age":entry.at.elapsed().as_secs()}))
             .collect();
         drop(routes);
         let dir = self.config.transparent.state_dir.clone();
         let data = serde_json::to_vec(
-            &serde_json::json!({"saved":time::OffsetDateTime::now_utc().unix_timestamp(),"routes":entries}),
+            &serde_json::json!({"schema":2,"saved":time::OffsetDateTime::now_utc().unix_timestamp(),"routes":entries}),
         )?;
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&dir)?;
@@ -578,7 +721,7 @@ impl State {
         };
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let age = now.saturating_sub(doc["saved"].as_i64().unwrap_or(0));
-        if !(0..=86400).contains(&age) {
+        if doc["schema"].as_u64() != Some(2) || !(0..=120).contains(&age) {
             return;
         }
         if let Some(entries) = doc["routes"].as_array() {
@@ -594,7 +737,17 @@ impl State {
                 };
                 if matches!(&route,Route::Direct(address)|Route::DirectNoSni(address) if public_ip(address.ip())&&address.port()==443)
                 {
+                    let route_age =
+                        age as u64 + entry["age"].as_u64().unwrap_or(self.config.cache_seconds);
+                    if route_age >= self.config.cache_seconds
+                        || Traffic::classify(host, "/") == Traffic::Bulk
+                    {
+                        continue;
+                    }
                     self.cache_route(host, route).await;
+                    if let Some(cached) = self.routes.lock().await.get_mut(host) {
+                        cached.at = Instant::now() - Duration::from_secs(route_age);
+                    }
                 }
             }
         }
@@ -604,7 +757,10 @@ impl State {
         match self.dial(host, &route).await {
             Ok(stream) => Ok(stream),
             Err(first) => {
-                self.routes.lock().await.remove(host);
+                self.routes
+                    .lock()
+                    .await
+                    .remove(&Traffic::classify(host, "/").key(host));
                 if self.config.mode_for(host) != Mode::Auto {
                     return Err(first);
                 }
@@ -846,7 +1002,11 @@ async fn handle(mut client: TcpStream, state: Arc<State>) -> Result<()> {
     )
     .await;
     if result.is_err() {
-        state.routes.lock().await.remove(&host);
+        state
+            .routes
+            .lock()
+            .await
+            .remove(&Traffic::classify(&host, "/").key(&host));
     }
     result
 }
@@ -868,7 +1028,7 @@ async fn diagnose(state: Arc<State>) -> Result<()> {
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
-        println!("GitHubTurbo 0.3\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\nDefault: enable system integration. Config: beside executable, otherwise ./config.json");
+        println!("GitHubTurbo 0.5\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\nDefault: enable system integration. Config: beside executable, otherwise ./config.json");
         return Ok(());
     }
     let command = args.first().map(String::as_str).unwrap_or("enable");
@@ -939,11 +1099,31 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     state.restore_routes().await;
+    state.sources.restore(&state.config.transparent.state_dir);
+    let sources_state = state.clone();
+    let sources_task = tokio::spawn(async move {
+        loop {
+            if sources_state.optimization().host_sources {
+                if let Err(e) = sources_state
+                    .sources
+                    .refresh(
+                        &sources_state.resolver,
+                        &sources_state.config.transparent.state_dir,
+                    )
+                    .await
+                {
+                    eprintln!("hosts source refresh: {e}");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
     let maintenance = state.clone();
     let maintenance = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             maintenance.pool.prune().await;
+            maintenance.warm.prune().await;
             let _ = maintenance.persist_routes().await;
         }
     });
@@ -977,6 +1157,7 @@ async fn main() -> Result<()> {
     }
     tasks.abort_all();
     maintenance.abort();
+    sources_task.abort();
     let _ = state.persist_routes().await;
     Ok(())
 }
@@ -1017,6 +1198,45 @@ mod tests {
         let cache = state.routes.lock().await;
         assert_eq!(cache.len(), 2);
         assert!(!cache.contains_key("github.com"));
+    }
+    #[tokio::test]
+    async fn old_route_cache_is_ignored_and_profiles_do_not_overwrite_each_other() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "turbo-route-test-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        std::fs::create_dir(&dir)?;
+        let mut cfg = config();
+        cfg.transparent.state_dir = dir.clone();
+        let state = State::new(cfg)?;
+        let route = Route::Direct("1.1.1.1:443".parse()?);
+        let file = dir.join("routes-good.json");
+        std::fs::write(
+            &file,
+            serde_json::to_vec(
+                &serde_json::json!({"saved":time::OffsetDateTime::now_utc().unix_timestamp(),"routes":[{"host":"github.com","route":route}]}),
+            )?,
+        )?;
+        state.restore_routes().await;
+        assert!(state.routes.lock().await.is_empty());
+        state
+            .cache_route_for("github.com", Traffic::Latency, route.clone())
+            .await;
+        state
+            .cache_route_for("github.com", Traffic::Bulk, Route::Proxy)
+            .await;
+        assert_eq!(state.routes.lock().await["github.com"].route, route);
+        assert_eq!(
+            state.routes.lock().await["bulk:github.com"].route,
+            Route::Proxy
+        );
+        state.persist_routes().await?;
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+        assert_eq!(saved["schema"], 2);
+        assert_eq!(saved["routes"].as_array().unwrap().len(), 1);
+        std::fs::remove_file(file)?;
+        std::fs::remove_dir(dir)?;
+        Ok(())
     }
     #[test]
     fn scope_and_authority() {

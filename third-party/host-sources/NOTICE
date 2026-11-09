@@ -1,0 +1,15 @@
+Runtime address candidate sources (user-requested)
+https://github.com/jianboy/github-host
+  https://raw.githubusercontent.com/jianboy/github-host/master/hosts
+https://github.com/521xueweihan/GitHub520
+  https://raw.githubusercontent.com/521xueweihan/GitHub520/main/hosts
+https://github.com/maxiaof/github-hosts
+  https://raw.githubusercontent.com/maxiaof/github-hosts/master/hosts
+
+The application fetches these public address lists at runtime. No source code
+or complete hosts table from these projects is embedded or redistributed.
+Only validated in-scope public host/IP facts are cached locally (up to 24 hours).
+All facts remain untrusted: upstream TLS verifies the original GitHub name.
+The maxiaof repository supplies MulanPSL-2.0; its license is included here.
+No license grant for the other projects is assumed.
+Implementation of fetching, parsing, bounded cache and routing is original.

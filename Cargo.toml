@@ -1,10 +1,10 @@
 [package]
 name = "github-turbo"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "time", "sync", "signal"] }
 tokio-native-tls = "0.3"
 native-tls = { version = "0.2", features = ["alpn"] }
 serde = { version = "1", features = ["derive"] }

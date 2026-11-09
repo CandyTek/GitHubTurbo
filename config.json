@@ -21,7 +21,13 @@
   "optimization": {
     "http2": true,
     "public_cache": true,
-    "segmented_downloads": true,
-    "seed_routes": true
+    "segmented_downloads": false,
+    "seed_routes": true,
+    "range_memo": true,
+    "probe_reuse": true,
+    "range_pipeline": false,
+    "adaptive_split": true,
+    "host_sources": true,
+    "adaptive_routing": true
   }
 }

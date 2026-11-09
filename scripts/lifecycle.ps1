@@ -1,7 +1,9 @@
-# Exercises actual Windows integration. Run as administrator; leaves acceleration enabled.
+﻿# Exercises actual Windows integration. Run as administrator; restores disabled state by default.
+param([switch]$LeaveEnabled)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $launcher=Join-Path $root 'dist\windows.ps1'
+$version=((Get-Content -Raw (Join-Path $root 'Cargo.toml')) | Select-String '(?m)^version = "([^"]+)"').Matches[0].Groups[1].Value
 $sessionPath=Join-Path $root 'dist\state\session.json'
 $hostsPath=Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 function Assert-Restored($previous) {
@@ -42,6 +44,10 @@ try {
     Assert-Restored $before
 } finally { [IO.File]::WriteAllBytes($configPath,$configBytes) }
 Write-Output 'PASS: recovery works even when config.json is malformed'
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcher -Action enable -NoBrowser
-if ($LASTEXITCODE -ne 0) { throw 'Final enable failed' }
-@{normal_stop='passed';crash_recovery='passed';invalid_config_recovery='passed';hosts='byte-exact';ssh='byte-exact';git='restored';nrpt='removed';ca='removed';recovery_task='removed';final='enabled'} | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $root 'reports\lifecycle-0.3.json')
+$final='disabled'
+if ($LeaveEnabled) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcher -Action enable -NoBrowser
+    if ($LASTEXITCODE -ne 0) { throw 'Final enable failed' }
+    $final='enabled'
+}
+@{normal_stop='passed';crash_recovery='passed';invalid_config_recovery='passed';hosts='byte-exact';ssh='byte-exact';git='restored';nrpt='removed';ca='removed';recovery_task='removed';final=$final} | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $root ('reports\lifecycle-'+$version+'.json'))

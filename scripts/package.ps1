@@ -12,6 +12,8 @@ Copy-Item -LiteralPath (Join-Path $root 'config.json') -Destination (Join-Path $
 Copy-Item -LiteralPath (Join-Path $root 'dist\licenses') -Destination $stage -Recurse -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'scripts\download.ps1') -Destination (Join-Path $stage 'scripts\download.ps1')
+Copy-Item -LiteralPath (Join-Path $root 'scripts\hosts.ps1') -Destination (Join-Path $stage 'scripts\hosts.ps1')
+Copy-Item -LiteralPath (Join-Path $root 'dist\docs') -Destination $stage -Recurse -Force
 $archive=Join-Path $root ("packages\GitHubTurbo-$version-windows-x64.zip")
 Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.LastWriteTimeUtc -lt [datetime]'1981-01-01' } | ForEach-Object { $_.LastWriteTimeUtc=[datetime]'2000-01-01' }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force

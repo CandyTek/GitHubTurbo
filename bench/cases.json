@@ -1,0 +1,102 @@
+[
+  {
+    "id": "raw",
+    "name": "Raw 小文件",
+    "kind": "http",
+    "url": "https://raw.githubusercontent.com/octocat/Hello-World/7fd1a60b01f91b314f59955a4e4d4e80d8edf11d/README",
+    "status": 200,
+    "bytes": 13,
+    "sha256": "03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab340",
+    "suite": "quick"
+  },
+  {
+    "id": "css",
+    "name": "网页 CSS",
+    "kind": "http",
+    "url": "https://github.githubassets.com/assets/light-0011b1fed09cb294.css",
+    "status": 200,
+    "bytes": 87305,
+    "sha256": "be4716a33447d160d878c61f3e38778267faf83d16ac26f8fbdda5ba0feeb8f4",
+    "suite": "quick"
+  },
+  {
+    "id": "release-small",
+    "name": "Release 校验清单",
+    "kind": "http",
+    "url": "https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_checksums.txt",
+    "status": 200,
+    "bytes": 1971,
+    "sha256": "f756e7859d90dbb5e85aae5194206c37da220bec9bac23d3d659078a8e766fdc",
+    "suite": "quick"
+  },
+  {
+    "id": "web",
+    "name": "GitHub 仓库网页",
+    "kind": "http",
+    "url": "https://github.com/octocat/Hello-World",
+    "status": 200,
+    "validator": "html",
+    "suite": "browse"
+  },
+  {
+    "id": "api",
+    "name": "GitHub API",
+    "kind": "http",
+    "url": "https://api.github.com/repos/octocat/Hello-World",
+    "status": 200,
+    "validator": "repository",
+    "suite": "browse"
+  },
+  {
+    "id": "git-clone",
+    "name": "Git HTTPS 浅克隆及 fetch",
+    "kind": "git",
+    "url": "https://github.com/octocat/Hello-World.git",
+    "head": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+    "suite": "git"
+  },
+  {
+    "id": "release-range",
+    "name": "Release 1 MiB 续传",
+    "kind": "http",
+    "url": "https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_arm64.tar.gz",
+    "status": 206,
+    "bytes": 1048576,
+    "range": "0-1048575",
+    "total": 13661485,
+    "suite": "download",
+    "sha256": "14c42617408e6eb22e6cd7d47c76662cf61f2b7b26f415e5b8cc08d573e78237",
+    "digest_source": "verified_release_prefix"
+  },
+  {
+    "id": "release-full",
+    "name": "Release 13 MiB 完整下载",
+    "kind": "http",
+    "url": "https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_arm64.tar.gz",
+    "status": 200,
+    "bytes": 13661485,
+    "sha256": "ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63",
+    "suite": "download",
+    "digest_source": "github_release_digest"
+  },
+  {
+    "id": "git-medium",
+    "name": "Git 中型仓库（curl 固定版本）",
+    "kind": "git",
+    "url": "https://github.com/curl/curl.git",
+    "branch": "curl-8_13_0",
+    "head": "1c3149881769e7bd79b072e48374e4c2b3678b2f",
+    "suite": "git-large"
+  },
+  {
+    "id": "release-fgit",
+    "name": "用户实例 fgit Release 完整下载",
+    "kind": "http",
+    "url": "https://github.com/fastgh/fgit/releases/download/v1.2.0/fgit.exe",
+    "status": 200,
+    "bytes": 7531520,
+    "sha256": "b867b472001a9222bb5b6f89a09e73567b6583f9f75a7aff6304a49ef14d0995",
+    "suite": "download",
+    "digest_source": "local_tls_verified_reference_not_publisher_digest"
+  }
+]

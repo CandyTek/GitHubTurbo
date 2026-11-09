@@ -15,15 +15,37 @@ struct CacheWrite {
     buffer: BytesMut,
 }
 struct CountedBody {
-    inner: Incoming,
+    inner: HttpBody,
     state: Arc<State>,
     upload: bool,
     lease: Option<pool::Lease>,
     cache: Option<CacheWrite>,
+    observation: Option<Transfer>,
+}
+struct Transfer {
+    host: String,
+    route: Route,
+    start: Instant,
+    bytes: u64,
+}
+impl CountedBody {
+    fn finish_transfer(&mut self, complete: bool) {
+        if let Some(t) = self.observation.take() {
+            self.state
+                .performance
+                .record(&t.host, &t.route, t.bytes, t.start.elapsed(), complete);
+            if !complete {
+                self.state
+                    .health
+                    .fail(&t.host, &t.route, health::Failure::Network);
+            }
+        }
+    }
 }
 impl Drop for CountedBody {
     fn drop(&mut self) {
         if self.inner.is_end_stream() {
+            self.finish_transfer(true);
             if let Some(write) = self.cache.take() {
                 self.state.content_cache.put(
                     write.key,
@@ -52,6 +74,9 @@ impl Body for CountedBody {
                         &self.state.counters.downloaded
                     };
                     counter.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    if let Some(t) = self.observation.as_mut() {
+                        t.bytes += data.len() as u64;
+                    }
                     if let Some(write) = self.cache.as_mut() {
                         if write.buffer.len() + data.len() <= content_cache::Cache::MAX_ENTRY {
                             write.buffer.extend_from_slice(data);
@@ -65,11 +90,13 @@ impl Body for CountedBody {
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(error))) => {
+                self.finish_transfer(false);
                 self.cache = None;
                 self.lease.take();
-                Poll::Ready(Some(Err(error.into())))
+                Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
+                self.finish_transfer(true);
                 if let Some(write) = self.cache.take() {
                     self.state.content_cache.put(
                         write.key,
@@ -263,11 +290,12 @@ async fn forward(
         empty()
     } else {
         CountedBody {
-            inner: body,
+            inner: body.map_err(Into::into).boxed_unsync(),
             state: state.clone(),
             upload: true,
             lease: None,
             cache: None,
+            observation: None,
         }
         .boxed_unsync()
     };
@@ -311,7 +339,9 @@ async fn forward(
             .await
         {
             Ok(exchange) => {
-                let mut response = exchange.response;
+                let mut response = exchange
+                    .response
+                    .map(|body| body.map_err(Into::into).boxed_unsync());
                 let lease = exchange.lease;
                 let actual = lease.route().clone();
                 let status = response.status();
@@ -325,7 +355,10 @@ async fn forward(
                     state
                         .health
                         .success(host, &actual, start.elapsed().as_secs_f64() * 1000.);
-                    state.cache_route(host, actual.clone()).await;
+                    let traffic = Traffic::classify(host, uri.path());
+                    if traffic == Traffic::Latency {
+                        state.cache_route_for(host, traffic, actual.clone()).await;
+                    }
                 }
                 if (status.is_server_error() || status == StatusCode::MISDIRECTED_REQUEST)
                     && replayable
@@ -341,7 +374,9 @@ async fn forward(
                         }
                     }
                     if attempt == 0 {
-                        routes = state.alternatives(host, Some(&actual)).await;
+                        routes = state
+                            .alternatives(host, Some(&actual), Traffic::classify(host, uri.path()))
+                            .await;
                     }
                     if attempt < 4 && !routes.is_empty() {
                         state.health.event(host, "read-only-retry");
@@ -381,7 +416,16 @@ async fn forward(
                     // Keep the original response until the first Range batch proves useful.
                     // Falling back must not restart an already working single stream.
                     let head = response.headers().clone();
-                    if let Some(split) = segmented::start(state, host, &uri, &headers, &head).await
+                    if let Some(split) = segmented::start(
+                        state,
+                        host,
+                        &uri,
+                        &headers,
+                        &head,
+                        &actual,
+                        response.body_mut(),
+                    )
+                    .await
                     {
                         return Ok(split);
                     }
@@ -422,15 +466,35 @@ async fn forward(
                         upload: false,
                         lease: Some(lease),
                         cache,
+                        observation: if state.optimization().adaptive_routing
+                            && Traffic::classify(host, uri.path()) == Traffic::Bulk
+                            && status == StatusCode::OK
+                            && method != Method::HEAD
+                        {
+                            Some(Transfer {
+                                host: host.into(),
+                                route: actual.clone(),
+                                start: Instant::now(),
+                                bytes: 0,
+                            })
+                        } else {
+                            None
+                        },
                     }
                     .boxed_unsync()
                 }));
             }
             Err(error) => {
                 last = error.to_string();
-                state.routes.lock().await.remove(host);
+                state
+                    .routes
+                    .lock()
+                    .await
+                    .remove(&Traffic::classify(host, uri.path()).key(host));
                 if attempt == 0 && replayable {
-                    routes = state.alternatives(host, None).await;
+                    routes = state
+                        .alternatives(host, None, Traffic::classify(host, uri.path()))
+                        .await;
                 }
                 if !replayable {
                     break;

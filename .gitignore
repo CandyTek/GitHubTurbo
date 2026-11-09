@@ -6,4 +6,8 @@
 /state/
 /packages/
 /config.legacy.json
+/bench/binaries/
+/bench/work/
+/bench/runs/
+__pycache__/
 

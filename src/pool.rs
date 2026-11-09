@@ -86,9 +86,10 @@ pub fn session_host(host: &str) -> bool {
         || host.starts_with("uploads.")
 }
 impl Pool {
-    async fn host(&self, host: &str) -> Result<Arc<HostPool>> {
+    async fn host(&self, host: &str, traffic: Traffic) -> Result<Arc<HostPool>> {
+        let key = traffic.key(host);
         let mut hosts = self.hosts.lock().await;
-        if hosts.len() >= 64 && !hosts.contains_key(host) {
+        if hosts.len() >= 64 && !hosts.contains_key(&key) {
             hosts.retain(|_, pool| {
                 Arc::strong_count(pool) > 1
                     || pool
@@ -102,7 +103,7 @@ impl Pool {
                 return Err(err("upstream host capacity reached"));
             }
         }
-        Ok(hosts.entry(host.into()).or_default().clone())
+        Ok(hosts.entry(key).or_default().clone())
     }
     fn pick(
         pool: &HostPool,
@@ -149,8 +150,17 @@ impl Pool {
         host: &str,
         route: Option<&Route>,
         independent: bool,
+        traffic: Traffic,
     ) -> Result<Lease> {
-        let pool = self.host(host).await?;
+        let pool = self.host(host, traffic).await?;
+        // Re-evaluate bulk routes before reusing a connection: a previous slow
+        // body must not keep winning merely because its headers arrived quickly.
+        let selected_bulk = if traffic == Traffic::Bulk && route.is_none() {
+            Some(state.select_for(host, traffic).await?)
+        } else {
+            None
+        };
+        let route = route.or(selected_bulk.as_ref());
         loop {
             let notified = pool.notify.notified();
             tokio::pin!(notified);
@@ -164,7 +174,11 @@ impl Pool {
                 self.reused.fetch_add(1, Ordering::Relaxed);
                 return Ok(lease);
             }
-            let cap = if session_host(host) { 1 } else { 4 };
+            let cap = if session_host(host) && traffic == Traffic::Latency {
+                1
+            } else {
+                4
+            };
             {
                 let mut channels = pool.channels.lock().unwrap();
                 if route.is_some() {
@@ -178,7 +192,7 @@ impl Pool {
             if can_build {
                 let selected = match route {
                     Some(route) => route.clone(),
-                    None => state.select(host).await?,
+                    None => state.select_for(host, traffic).await?,
                 };
                 let start = Instant::now();
                 let channel = match self
@@ -229,21 +243,22 @@ impl Pool {
         capacity: tokio::sync::OwnedSemaphorePermit,
         force_http1: bool,
     ) -> Result<Channel> {
-        let socket = state.dial(host, &route).await?;
-        let tls = match (
-            state.optimization().http2 && !force_http1,
-            matches!(route, Route::DirectNoSni(_)),
-        ) {
-            (true, true) => &state.tls_http_no_sni,
-            (true, false) => &state.tls_http,
-            (false, true) => &state.tls_no_sni,
-            (false, false) => &state.tls,
+        let h2 = state.optimization().http2 && !force_http1;
+        let warm = if state.optimization().probe_reuse {
+            state.warm.take(host, &route, h2).await
+        } else {
+            None
         };
-        let stream = timeout(
-            Duration::from_millis(state.config.connect_timeout_ms),
-            tls.connect(host, socket),
-        )
-        .await??;
+        let stream = if let Some(stream) = warm {
+            stream
+        } else {
+            let socket = state.dial(host, &route).await?;
+            timeout(
+                Duration::from_millis(state.config.connect_timeout_ms),
+                state.connector(&route, h2).connect(host, socket),
+            )
+            .await??
+        };
         let h2 = stream
             .get_ref()
             .negotiated_alpn()?
@@ -302,6 +317,7 @@ impl Pool {
         route: Option<&Route>,
         budget: Option<Duration>,
     ) -> Result<Exchange> {
+        let traffic = Traffic::classify(host, request.uri().path());
         let independent = request.extensions().get::<IndependentRange>().is_some();
         // Classic WebSocket upgrades need their own HTTP/1.1 connection. An h2
         // channel cannot carry an HTTP/1.1 Upgrade or become an exclusive tunnel.
@@ -313,7 +329,7 @@ impl Pool {
             .await??;
             let selected = match route {
                 Some(route) => route.clone(),
-                None => state.select(host).await?,
+                None => state.select_for(host, traffic).await?,
             };
             let channel = self
                 .build(
@@ -329,7 +345,8 @@ impl Pool {
             self.created.fetch_add(1, Ordering::Relaxed);
             Lease(Arc::new(channel))
         } else {
-            self.acquire(state, host, route, independent).await?
+            self.acquire(state, host, route, independent, traffic)
+                .await?
         };
         let work = async {
             match &lease.0.sender {
@@ -376,7 +393,7 @@ impl Pool {
     }
     pub async fn snapshot(&self) -> serde_json::Value {
         let hosts = self.hosts.lock().await;
-        let entries:Vec<_>=hosts.iter().flat_map(|(host,pool)|pool.channels.lock().unwrap().iter().map(|c|serde_json::json!({"host":host,"route":c.route,"protocol":match c.sender{Sender::H1(_)=>"http/1.1",Sender::H2(_)=>"h2"},"active":c.active.load(Ordering::Relaxed),"idle_seconds":c.last.lock().unwrap().elapsed().as_secs(),"closed":c.closed.load(Ordering::Relaxed)})).collect::<Vec<_>>()).collect();
+        let entries:Vec<_>=hosts.iter().flat_map(|(host,pool)|pool.channels.lock().unwrap().iter().map(|c|serde_json::json!({"host":host.strip_prefix("bulk:").unwrap_or(host),"profile":if host.starts_with("bulk:"){"bulk"}else{"latency"},"route":c.route,"protocol":match c.sender{Sender::H1(_)=>"http/1.1",Sender::H2(_)=>"h2"},"active":c.active.load(Ordering::Relaxed),"idle_seconds":c.last.lock().unwrap().elapsed().as_secs(),"closed":c.closed.load(Ordering::Relaxed)})).collect::<Vec<_>>()).collect();
         serde_json::json!({"created":self.created.load(Ordering::Relaxed),"reused":self.reused.load(Ordering::Relaxed),"h2_created":self.h2_created.load(Ordering::Relaxed),"channels":entries})
     }
     pub async fn clear(&self) {

@@ -1,9 +1,12 @@
+param([switch]$SkipTests)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    cargo test --locked --target x86_64-pc-windows-msvc
-    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    if (!$SkipTests) {
+        cargo test --locked --target x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    }
     cargo build --release --locked --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'dist') | Out-Null
@@ -22,6 +25,7 @@ try {
     Copy-Item -Path (Join-Path $root 'docs\*.md') -Destination (Join-Path $root 'dist\docs')
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'dist\scripts') | Out-Null
     Copy-Item -LiteralPath (Join-Path $root 'scripts\download.ps1') -Destination (Join-Path $root 'dist\scripts\download.ps1')
+    Copy-Item -LiteralPath (Join-Path $root 'scripts\hosts.ps1') -Destination (Join-Path $root 'dist\scripts\hosts.ps1')
     $metadata = cargo metadata --format-version 1 --locked | ConvertFrom-Json
     $inventory = foreach ($package in $metadata.packages) {
         if ($package.name -eq 'github-turbo') { continue }
