@@ -1,65 +1,63 @@
-# 0.5.0 选路修正与真实测试
+# 0.5.0 Routing Fixes and Real-World Testing
 
-这版优先修正选路，默认保持普通单流下载，不增加每次下载的 Range 试探。
+This release prioritizes routing improvements. It maintains standard single-stream downloads by default and does not introduce additional Range-request probes.
 
-## 修正
+## Fixes
 
-- 独立 DoH 拿到有效地址后合并等待最多 30 ms 即返回，其余解析任务后台补全；不再等待最慢的供应商。
-- 实时 DNS 连接先开始，400 ms 后才启动 hosts 与内置地址兜底。内置清单不再只取前 8 条，而从整个候选池分散取样。
-- 网页保持经过证书校验的连接延迟竞争。Release、objects、codeload 和 Git 使用独立线路与连接池；下载按 DNS 顺序，每个后备地址延迟 150 ms 尝试，避免 TLS 的微小差异决定下载出口。
-- 完整且至少 4 MiB 的 200 响应才记录实际吞吐；短片段、206 和客户端取消不当作成功带宽样本。实际正文错误会反馈故障。最后一次完整传输的慢速会立即影响后续选择；不以旧的高速平均值掩盖下降。
-- 观测值是端到端吞吐，会受到文件、时段和下游读取速度影响。历史按域名与出口隔离，最多 512 项，进程内保留最多六小时；更换网络后可重新选路。
-- 不在正文中途换 IP，不重放 Git POST，不把其他用户的 hosts、证书或代理配置打包。
-- 0.4 线路缓存失效；新的网页缓存短期恢复并计入原有年龄，下载线路和吞吐每次启动重新学习。
+- When a DoH (DNS-over-HTTPS) query returns a valid address, the system proceeds immediately—waiting at most 30 ms for other concurrent resolution tasks to complete in the background—rather than waiting for the slowest provider.
+- Real-time DNS resolution is initiated first; a 400 ms delay is applied before falling back to `hosts` entries or built-in address lists. Built-in lists are now sampled from the entire candidate pool, rather than being limited to the first 8 entries.
+- For web requests, the system continues to use a latency-based competition model, with all connections undergoing certificate validation. Separate routing paths and connection pools are used for `release`, `objects`, `codeload`, and Git operations. During downloads, the system follows the DNS-resolved order, introducing a 150 ms delay between attempts for each fallback address to prevent minor TLS handshake timing differences from dictating the chosen egress path.
+- Throughput is only recorded based on complete "200 OK" responses with a payload of at least 4 MiB. Short fragments, "206 Partial Content" responses, and client-initiated cancellations are excluded from bandwidth sampling. Errors occurring during the transfer of the response body are flagged as failures. If the most recent complete transfer is slow, this immediately impacts future routing decisions—ensuring that a decline in performance is not masked by historical high-speed averages.
+- Observed metrics represent end-to-end throughput, which may be influenced by the specific file, time of day, and downstream read speeds. Historical data is segmented by domain and egress point (up to 512 entries) and retained in-memory for a maximum of six hours; routing decisions are reset upon network changes.
+- The system does not switch IP addresses mid-stream, does not replay Git POST requests, and does not bundle third-party `hosts` entries, certificates, or proxy configurations.
+- Routing caches from version 0.4 are invalidated. New web-related caches are restored for the short term, retaining their original age metadata, while download-specific routing paths and throughput metrics are re-learned from scratch upon each application launch.
 
-## 三个来源
+## Three Sources
 
-运行时读取用户指定项目的 hosts 文件：
+The application fetches `hosts` files from the following user-specified repositories at runtime:
 
-- [jianboy/github-host](https://github.com/jianboy/github-host)：`master/hosts`
-- [521xueweihan/GitHub520](https://github.com/521xueweihan/GitHub520)：`main/hosts`
-- [maxiaof/github-hosts](https://github.com/maxiaof/github-hosts)：`master/hosts`
+- [jianboy/github-host](https://github.com/jianboy/github-host): `master/hosts`
+- [521xueweihan/GitHub520](https://github.com/521xueweihan/GitHub520): `main/hosts`
+- [maxiaof/github-hosts](https://github.com/maxiaof/github-hosts): `master/hosts`
 
-启动后后台更新，之后每小时刷新；失败保留先前成功数据，超过 24 小时停用。每份响应最多 256 KiB，最多 512 个受支持域名、每域名 16 个公网地址。拒绝回环、私网、非法域名、范围外域名及重定向。候选不会整表写入系统 hosts，每次上游 TLS 仍验证 GitHub 原始主机名。
+Updates occur in the background upon startup and subsequently every hour. If an update fails, the previously successful data is retained; however, if no successful update has occurred for over 24 hours, the feature is disabled. Each response is limited to a maximum size of 256 KiB, supporting up to 512 domain names, with a limit of 16 public IP addresses per domain. Loopback addresses, private network addresses, invalid domain names, out-of-scope domains, and redirects are rejected. Candidate entries are not written to the system `hosts` file in their entirety; the original GitHub hostnames are still verified via TLS during upstream connections.
 
-本机实际刷新得到 36、33、31 个范围内域名；这是本次内容快照，之后随来源变化。完整来源代码和 hosts 表均未嵌入发行包，来源说明与 maxiaof 的木兰许可证随包附带。
+In the current local environment, 36, 33, and 31 in-scope domain names were retrieved from the respective sources. This represents a snapshot of the content at the time of retrieval, which may change as the source repositories are updated. Neither the source code nor the full `hosts` tables are embedded in the release package; however, information regarding the sources—along with the Mulan License provided by `maxiaof`—is included.
 
-## 本机 hosts
+## Local `hosts`
 
-已清理旧 GitHub 静态映射和旧 GitHub520 区块，共影响 56 行，保留无关映射。原文件逐字节备份：
+Legacy static GitHub mappings and old `GitHub520` blocks have been removed (affecting 56 lines in total), while unrelated mappings remain untouched. A byte-for-byte backup of the original file has been created at:
 
 `I:\RcProject\GitHubTurbo\state\hosts-backups\20261108-210919-122-6e85ab9a.json`
 
-同目录 `.bin` 为完整备份。此目录不进入发行包。`scripts/hosts.ps1` 可查看、清理或恢复；恢复检查原始 SHA256，且要求当前文件仍等于清理结果，防止覆盖后续编辑。
+A full backup in `.bin` format is also available in the same directory. This directory is not included in the release package. You may use `scripts/hosts.ps1` to view, clean, or restore the `hosts` file. The restoration process verifies the original SHA256 hash and ensures that the current file matches the state following the cleanup, preventing the accidental overwriting of any subsequent manual edits.
 
-## 验证方法
+## Verification Methodology
 
-引擎原有及新增 29 项测试通过；平台 12 项测试通过；hosts 工具验证无关条目、混合别名、CRLF、逐字节恢复和后续编辑保护。TLS 原域名校验、流式传输、HTTP/2 复用、POST 不重放和实验分段的内容一致性均保留。
+The engine passed 29 existing and newly added tests, while the platform passed 12 tests. The `hosts` utility was verified for handling irrelevant entries, mixed aliases, CRLF sequences, byte-by-byte recovery, and protection against subsequent edits. Existing features—including TLS origin domain validation, streaming, HTTP/2 multiplexing, prevention of POST request replays, and content consistency during experimental segmentation—remain intact.
 
-公网测试使用独立 CA、私有端口的旧版与新版实例，均无上游代理，不修改系统接入。文件下载校验长度与 SHA256；网页检查 HTML；Raw/CSS 使用固定内容校验；克隆执行仓库检查并比对预期提交。每轮轮换顺序，保留失败及超时。
+Public-network testing was conducted using both legacy and current versions of the instances, deployed on private ports with independent Certificate Authorities (CAs). No upstream proxies were used, and no modifications were made to system-level network access. File downloads were verified by length and SHA256 hash; web pages were checked for HTML integrity; and "Raw" or CSS content was verified against fixed reference data. For repository cloning, the resulting repositories were inspected and compared against the expected commits. The test rotation order was varied in each round, with failures and timeouts recorded.
 
-用户提供的文件为 `fastgh/fgit` v1.2.0 的 `fgit.exe`，7,531,520 字节；只下载，不执行。SHA256 `b867b472001a9222bb5b6f89a09e73567b6583f9f75a7aff6304a49ef14d0995` 是 TLS 校验下载得到的本地一致性参考，并非发布者签名。
+The file provided by the user is `fgit.exe` (version 1.2.0 from `fastgh/fgit`), with a size of 7,531,520 bytes; the file was downloaded but not executed. The SHA256 hash—`b867b472001a9222bb5b6f89a09e73567b6583f9f75a7aff6304a49ef14d0995`—serves as a local consistency reference for the downloaded file (verified via TLS) and does not represent a digital signature from the publisher.
 
-`direct` 使用独立 DoH 的首个 IPv4 后直连，不等同于 Edge 的系统 DNS、缓存或 HTTP/3。客户端 curl 前端为 HTTP/1.1，两个 Turbo 实例可在上游协商 HTTP/2。不能把这些结果直接声称为 Edge 的性能排名。
+The `direct` mode utilizes a direct connection following the resolution of the first IPv4 address via an independent DNS-over-HTTPS (DoH) service; this is distinct from the system DNS, caching, or HTTP/3 mechanisms used by Edge. While the client-side `curl` interface operates via HTTP/1.1, the two "Turbo" instances are capable of negotiating HTTP/2 with the upstream server. Consequently, these results cannot be directly interpreted as a performance ranking for Edge.
 
-## 迭代记录
+## Iteration Log
 
-首次中间版本对照：`20261108-211249-e2927d`，候选 SHA256 `d4a4ae192f8bd64e99d387e852d92a3a032119bb15de599dddf8c57d9e45829f`。fgit 完整下载各六次：旧版成功 3 次，新版成功 3 次，独立 DoH 直连成功 4 次。存在 1 秒多成功和 30 秒超时，不能据此宣称新版整体更快。此次结果促成下载 DNS 地址顺序优先，而网页保持延迟竞争。
+Initial intermediate version comparison: `20261108-211249-e2927d`, candidate SHA256 `d4a4ae192f8bd64e99d387e852d92a3a032119bb15de599dddf8c57d9e45829f`. Six full-download tests were conducted for each configuration: the legacy version succeeded 3 times, the new version succeeded 3 times, and the independent DoH direct-connection method succeeded 4 times. Observed durations ranged from just over 1 second to 30-second timeouts; therefore, it cannot be claimed that the new version is faster overall. Based on these results, the download process has been adjusted to prioritize the order of DNS addresses, while web-page requests continue to rely on a latency-based competition model.
 
-最终版本对照：`20261108-212112-f4a38c`，候选 SHA256 `d025544d68a3161ba2637a153a7ec15d678a94d98a49c40ff382141f20399e36`。完整报告同时提供原始 JSON 与离线 HTML，最终统计见下方。
+Final version comparison: `20261108-212112-f4a38c`, candidate SHA256 `d025544d68a3161ba2637a153a7ec15d678a94d98a49c40ff382141f20399e36`. The complete report is provided in both raw JSON and offline HTML formats; final statistics are presented below.
 
-每项每种方式四次（两轮，冷/热各一次），超时预算 30 秒。括号为成功次数；耗时为成功样本中位数，不能忽略成功率比较大小。
+Each scenario was tested four times (across two rounds, covering both "cold" and "warm" states), with a 30-second timeout threshold. Values ​​in parentheses indicate the number of successful attempts; time figures represent the median duration among successful samples. Note that success rates must also be considered when comparing performance. 
 
-| 项目 | 0.4.1 | 0.5.0 | 独立 DoH 直连 |
+| Item | 0.4.1 | 0.5.0 | Standalone DoH (Direct Connection) |
 | --- | --- | --- | --- |
-| 网页 | 1.274 s（4/4） | 0.778 s（4/4） | 0.631 s（4/4） |
-| Raw | 0.160 s（4/4） | 0.158 s（4/4） | 0.276 s（4/4） |
-| CSS | 0.131 s（4/4） | 0.131 s（4/4） | 0.273 s（4/4） |
-| 浅克隆与 fetch | 1.610 s（4/4） | 1.227 s（4/4） | 1.336 s（4/4） |
-| fgit 完整下载 | 30 s 内均未完成（0/4） | 3.082 s（2/4），另两次超时 | 30 s 内均未完成（0/4） |
+| Web Page | 1.274 s (4/4) | 0.778 s (4/4) | 0.631 s (4/4) |
+| Raw | 0.160 s (4/4) | 0.158 s (4/4) | 0.276 s (4/4) |
+| CSS | 0.131 s (4/4) | 0.131 s (4/4) | 0.273 s (4/4) |
+| Shallow Clone & Fetch | 1.610 s (4/4) | 1.227 s (4/4) | 1.336 s (4/4) |
+| fgit Full Download | Incomplete within 30 s (0/4) | 3.082 s (2/4); other 2 attempts timed out | Incomplete within 30 s (0/4) |
 
-fgit 成功两次分别为 1.712 s、4.452 s，长度与 SHA256 均一致，实际出口为 `185.199.109.133`。失败样本有 200 响应和部分正文，是预算内未传完；不能算成功，也不能由此推断文件遭到篡改。新版从完整下载记录到了两条有效吞吐样本。未把该 IP 写死为默认线路。
+The two successful `fgit` attempts took 1.712 s and 4.452 s, respectively; both the file size and SHA256 hash matched, with the actual egress point being `185.199.109.133`. Failed samples returned a 200 status code along with a partial body—indicating the transfer was simply incomplete within the allotted time—so these cannot be considered successful, nor can it be inferred that the files were tampered with. The new version successfully captured two valid throughput samples during full download attempts. This IP address has not been hardcoded as the default route. Peak engine resource usage in this round: Version 0.4.1—working set: 14,176,256 bytes, private memory: 5,365,760 bytes; Version 0.5.0—working set: 14,184,448 bytes (~13.53 MiB), private memory: 5,705,728 bytes (~5.44 MiB). These figures account only for the native engine—excluding the browser, benchmarking platform, system tray, and daemon processes—and do not represent an upper limit for all concurrent load scenarios.
 
-本轮引擎峰值采样：0.4.1 工作集 14,176,256 字节、私有内存 5,365,760 字节；0.5.0 工作集 14,184,448 字节（约 13.53 MiB）、私有内存 5,705,728 字节（约 5.44 MiB）。仅计原生引擎，不包括浏览器、测速平台、托盘与守护进程，不代表所有并发负载下的上限。
-
-结论：本轮网页和冷启动克隆有改善，Release 成功率有所改善但仍不稳定；首轮中间版本也存在新旧相近的情况。样本小、网络时段变化明显，尚不能宣称所有地区、所有 GitHub 访问都会更快。分段下载继续默认关闭，已有本地代理仍是可选项。
+Conclusion: Web-based operations and cold-start cloning have shown improvement. The success rate for "Release" operations has also improved, though it remains somewhat unstable. In some intermediate versions, performance is similar between newer and older builds. Given the small sample size and significant variability in network conditions over time, it cannot be claimed that access to GitHub will be faster in all regions or for all users. Segmented downloading remains disabled by default, and the option to use an existing local proxy continues to be available.

@@ -1,44 +1,42 @@
-# 本机验证结果
+# Local Verification Results
 
-日期：2026-11-08。主程序 Windows x64 Release 构建，现有上游为本机 Xray 的 HTTP 入口 `127.0.0.1:10808`。本机网络结果不能外推到其他地区或其他节点。
+Date: 2026-11-08. The main program is a Windows x64 Release build, configured to use a local Xray HTTP proxy endpoint at `127.0.0.1:10808`. These local network results cannot be extrapolated to other regions or nodes.
 
-## 交付与资源占用
+## Delivery and Resource Usage
 
-- exe 构建产物位于 `dist/github-turbo.exe`，本轮首次正式版本为 551,424 字节（约 539 KiB）；后续加入状态字段和测试后的最终大小、哈希以 `reports/artifact.json` 为准。
-- 初始代理模式：工作集 6.74 MiB、私有内存 1.55 MiB。
-- 自动模式完成多域名探测和实际请求后：工作集 10.46 MiB、私有内存 3.07 MiB。
-- 以上是 Windows `Get-Process` 的采样值，不是负载峰值/长期泄漏测试。没有测量其他候选软件，所以没有跨软件内存排行。
-- 主程序流式转发，不将整个响应读入内存。默认 64 隧道、每隧道两个 16 KiB 缓冲区，不代表总进程内存只有缓冲区大小。
+- The executable build artifact is located at `dist/github-turbo.exe`. This initial official release is 551,424 bytes (~539 KiB). Please refer to `reports/artifact.json` for the final file size and hash after the inclusion of status fields and subsequent testing.
+- Initial proxy mode: Working set 6.74 MiB, private memory 1.55 MiB.
+- After automatic mode completes multi-domain probing and actual requests: Working set 10.46 MiB, private memory 3.07 MiB.
+- The figures above are sampled values ​​obtained via the Windows `Get-Process` command; they do not represent peak load or results from long-term memory leak testing. No other software candidates were measured, so no cross-application memory usage ranking is provided.
+- The main program utilizes streaming forwarding and does not load entire responses into memory. It defaults to 64 tunnels, with two 16 KiB buffers per tunnel; note that the total process memory usage is not limited solely to the size of these buffers.
 
-## 网络样本
+## Network Samples
 
-最终策略：全局 `auto`，精确域名 `github.com` 固定 `proxy`，缓存 120 秒。以下取自 `reports/network.json`，单位秒。
+Final policy: Global `auto` mode, with `github.com` explicitly set to `proxy` and a cache duration of 120 seconds. The data below is sourced from `reports/network.json` (units in seconds). 
 
-| 请求 | 直连 | 已有代理 | GitHubTurbo | 观察 |
-| --- | ---: | ---: | ---: | --- |
-| GitHub 首页完整 HTML | 11.434 | 5.110 | 12.952 | 三者均 200；本轮原型较慢，不能声称普遍加速 |
-| GitHub API | 0.786 | 4.048 | 1.640 | 原型选择直连；首次探测增加开销 |
-| Raw README | 0.893 | 3.697 | 0.246 | 原型选择直连；早一轮直连曾超时，说明链路波动 |
-| Hello-World ZIP | 0.583 | 4.609 | 1.549 | 原型选择直连，三者内容哈希一致 |
-| GitHub CLI Release 校验清单 | 504 | 18.055 | 7.491 | 代理与原型经一次跳转均 200，文件哈希一致 |
+| Request | Direct Connection | Existing Proxy | GitHubTurbo | Observations |
+| --- | --- | --- | --- | --- |
+| Full GitHub Homepage HTML | 11.434 | 5.110 | 12.952 | All returned 200; the prototype was slower in this run—no claim of universal acceleration can be made. |
+| GitHub API | 0.786 | 4.048 | 1.640 | Prototype opted for a direct connection; initial probing added overhead. |
+| Raw README | 0.893 | 3.697 | 0.246 | Prototype opted for a direct connection; a previous direct-connection attempt timed out, indicating network instability. |
+| Hello-World ZIP | 0.583 | 4.609 | 1.549 | Prototype opted for a direct connection; content hashes match across all three. |
+| GitHub CLI Release Checksum List | 504 | 18.055 | 7.491 | Both the proxy and the prototype returned 200 (after one redirect); file hashes match. |
 
-此表是少量真实顺序请求样本，不是统计基准。另有诊断/Git 冒烟测试在部分采样期间运行，会影响线路负载和缓存温度。网页 HTML 随请求变化，不能比较整页 SHA256。API/Raw/ZIP 的成功响应哈希一致；Release 两条成功线路的 SHA256 均为 `f756e7859d90dbb5e85aae5194206c37da220bec9bac23d3d659078a8e766fdc`。
+This table represents a small sample of sequential, real-world requests and does not serve as a statistical benchmark. Additionally, diagnostic/Git smoke tests were running during some of the sampling periods, which may have affected network load and cache state. Since webpage HTML varies with each request, comparing full-page SHA256 hashes is not feasible. For the API, Raw, and ZIP files, the successful responses share identical hashes; for the Release file, both successful paths yielded an SHA256 hash of `f756e7859d90dbb5e85aae5194206c37da220bec9bac23d3d659078a8e766fdc`. The initial test of `3proxy 1.0.3 x64 Release` returned a 504 status code across all three tested routes (see `reports/network-proxy-baseline.json`); consequently, it was not recorded as a success, and no actual memory usage data could be obtained. Subsequently, the GitHub CLI’s official release verification manifest was used to validate the redirection of release domain requests. Note that this test involved a file of approximately 2 KiB; it does not demonstrate download speeds for large releases or the performance of resumed downloads.
 
-最初测试的 3proxy 1.0.3 x64 Release 在三条路线都返回 504（`reports/network-proxy-baseline.json`），没有将它记为成功或得到它的内存实测。随后改用 GitHub CLI 的官方 Release 校验清单验证了 Release 域名跳转。这里测试的是约 2 KiB 文件，不证明大型 Release 下载速度或断点续传性能。
+## Functionality and Reliability
 
-## 功能与可靠性
+- Rust unit tests cover: domain boundaries/ports/input injection, rejection of internal network (LAN) IPs, HTTP header limits, handling of tunnel bytes following reserved headers, bidirectional streams/half-closed connections, configuration scope and exact-match domain patterns, and cache capacity.
+- Passed `cargo clippy --all-targets --locked -- -D warnings`.
+- Local black-box integration tests confirm: requests to non-GitHub targets return 403; upstream 407 errors are converted to 502; the status interface functions correctly; 512 KiB binary data is transmitted with complete integrity; no data sent early by the upstream (within the same packet) is lost; and half-closed connections are handled properly.
+- Successful execution of a live `git ls-remote` (HEAD: `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`).
+- Successful execution of a live `git clone --depth=1`, with the checked-out `README` containing "Hello World!" (sample available in `reports/hello-world-smoke`).
+- The download script successfully retrieved the raw `README` (13 bytes) via the prototype; no modifications were made to the user's global Git configuration.
+- DNS comparison: System-based resolution and Cloudflare DoH returned different GitHub addresses (corresponding to different geographic regions). The raw DoH response provided four candidate IPv4 addresses, whereas the system-level resolution returned only one at the time. These discrepancies do not, in themselves, prove DNS poisoning; furthermore, these short-TTL addresses were not written into the default configuration.
+- The `diagnose` tool considers a 4xx response from the CDN root directory as evidence that the TLS/HTTP connection is reachable; therefore, a "successful" diagnostic result does not necessarily imply that any specific file was successfully downloaded.
 
-- Rust 单元测试：域名边界/端口/注入输入、内网 IP 拒绝、HTTP 头上限、保留头后隧道字节、双向流/半关闭、配置范围与精确域名模式、缓存容量。
-- `cargo clippy --all-targets --locked -- -D warnings` 通过。
-- 本地黑盒集成测试：非 GitHub 目标返回 403；上游 407 转换为 502；状态接口；512 KiB 二进制回传完全一致；不丢失上游同包提前发送的数据；半关闭正确。
-- 真实 `git ls-remote` 成功，HEAD 为 `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d`。
-- 真实 `git clone --depth=1` 成功，检出的 README 为 `Hello World!`；样本在 `reports/hello-world-smoke`。
-- 下载脚本通过原型取回 Raw README，13 字节。没有修改用户全局 Git 配置。
-- DNS 对照：系统解析和 Cloudflare DoH 返回了不同区域的 GitHub 地址；Raw 的 DoH 返回四个候选 IPv4，而系统当时只有一个。地址差异本身不证明 DNS 被污染；没有把这些短 TTL 地址写进默认配置。
-- `diagnose` 对 CDN 根目录收到 4xx 也可认定 TLS/HTTP 可达，因此其成功不等价于某一文件下载成功。
+## Pending Verification
 
-## 尚未完成的验证
+Several aspects remain unverified, including: browser login state persistence alongside full page resource loading; private repository operations (including `push`); Git LFS; resumable/chunked uploads and downloads for large files; long-term operational stability; performance under a peak load of 64 concurrent streams; and cross-regional comparative analysis. Furthermore, the current implementation cannot automatically recover via local transparent forwarding in scenarios where the upstream proxy is unavailable, an established TLS stream is interrupted, or the upstream returns a 5xx error.
 
-浏览器登录态与页面资源全量加载、私有仓库与 push、Git LFS、大文件断点续传/分段、长期驻留稳定性、64 路峰值负载、跨地区对比均未验证。代理上游本身不可用、已有 TLS 流中途断开或真实资源返回 5xx，不能通过本地透明转发保证恢复。
-
-结论：交付物是可运行、低占用的路由原型，已验证 Git、Raw、源码压缩包和 Release 跳转。当前提升来自复用已有出口并为适合直连的域名分流；网页和大文件的自动吞吐策略仍有后续空间。
+Conclusion: The deliverable is a functional, lightweight routing prototype that successfully handles Git operations, raw file access, source code archives, and redirects to release assets. The current performance gains are achieved by reusing existing egress points and offloading traffic for domains better suited for direct connections. There remains significant potential for further optimization regarding automated throughput strategies for web pages and large files.

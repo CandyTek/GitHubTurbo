@@ -1,34 +1,33 @@
-# Release 下载回归与 0.4.1 修正
+# Release Download Performance Revisited & 0.4.1 Fixes
 
-用户反馈 0.4 的 Release 下载感觉变慢。本次固定同一组上游 IP，使用同一个 0.4 exe，仅切换 `segmented_downloads`，交替顺序测试四轮，不使用正向代理。每次完整下载 13,661,485 字节的官方 GitHub CLI Release，并校验发布 API 提供的 SHA256。
+Following user feedback suggesting that release downloads in version 0.4 have become slower, we conducted a series of tests. Using the same 0.4 executable and a fixed set of upstream IP addresses, we performed four rounds of testing—alternating the `segmented_downloads` setting—without the use of a forward proxy. Each test involved a full download of the official GitHub CLI release (13,661,485 bytes), followed by a SHA256 checksum verification against the value provided by the GitHub Releases API.
 
-原始记录：`bench/runs/20261108-194842-86016e/report.json`，对应离线报告 `report.html`。固定 IP 写入两边测试实例和报告：github.com 为 20.205.243.166，release-assets.githubusercontent.com 为 185.199.110.133。它们只是本次控制变量，不写入用户默认配置，不作为长期可用地址推荐。
+Raw data: `bench/runs/20261108-194842-86016e/report.json`; corresponding offline report: `report.html`. The fixed IP addresses used for these tests—`20.205.243.166` for `github.com` and `185.199.110.133` for `release-assets.githubusercontent.com`—served solely as control variables for this experiment. They are not included in the default user configuration and are not recommended as reliable, long-term endpoints.
 
-| 指标 | 普通单流，关闭分段 | 默认试探，开启分段 |
+| Metric | Standard Single-Stream (Segmentation Disabled) | Default Probing (Segmentation Enabled) |
 | --- | ---: | ---: |
-| 成功 | 4/4 | 3/4 |
-| 成功样本耗时中位数 | 2.409 秒 | 3.581 秒 |
-| 超时 | 0 | 1 次，40 秒 |
-| 三组双方成功配对 | 三组都更快 | 三组都更慢 |
+| Successes | 4/4 | 3/4 |
+| Median Time for Successful Samples | 2.409 seconds | 3.581 seconds |
+| Timeouts | 0 | 1 (40 seconds) |
+| Relative Performance (3 Trials) | All 3 trials faster | All 3 trials slower |
 
-逐轮耗时（秒）：
+Duration per Trial (seconds):
 
-| 轮次 | 关闭分段 | 开启分段 |
+| Trial | Segmentation Disabled | Segmentation Enabled |
 | --- | ---: | ---: |
 | 1 | 2.309 | 6.709 |
 | 2 | 1.962 | 3.581 |
-| 3 | 15.897 | 40.039，超时 |
+| 3 | 15.897 | 40.039 (Timeout) |
 | 4 | 2.509 | 2.579 |
 
-开启方的成功样本中位耗时约增加 49%；超时没有混入该中位数，另行列出。所有成功下载的 SHA256 一致。这些结果支持用户的变慢反馈，不能推断所有地区、文件都有相同幅度。
+With segmentation enabled, the median time for successful samples increased by approximately 49%. Timeouts are excluded from this median and are listed separately. The SHA256 hashes for all successfully downloaded files were identical. These results corroborate user reports of slower performance, though the magnitude of this effect may vary by region and file.
 
-机制上，0.4 在保留原始响应时额外发起四路 Range；即使最后选择继续单流，也可能产生额外连接、响应数据和带宽竞争。首批 1 MiB 的胜负不能保证整文件持续吞吐。四次开启样本最后都回到单流，试探没有取得实际收益。网络仍有波动，第三轮连普通单流也明显变慢。
+Mechanistically, version 0.4 initiates four additional Range requests while maintaining the original response stream. Even if the system ultimately reverts to a single-stream download, this process can still generate extra connections, additional response data, and bandwidth contention. The outcome for the initial 1 MiB chunk does not guarantee sustained throughput for the entire file. In all four trials where segmentation was enabled, the process eventually reverted to a single-stream download, meaning the probing yielded no actual benefit. Network fluctuations were also present; in the third trial, even the standard single-stream download was noticeably slower.
 
-## 修正
+## Remediation
 
-- 已立即通过管理接口将本机正在运行的配置改为 `segmented_downloads=false`，关闭后续请求的自动分段试探。
-- 0.4.1 的内置缺省值与发行配置都默认关闭分段，将它标为实验选项；保留显式手动开启能力。
-- 保留 HTTP/2、已验证 TLS 探测连接复用、IP 优选、公共资源缓存；普通 Range/续传按客户端原请求处理。
-- 测速平台新增分段总开关实验和固定公网 IP 对照；分段子实验会在两边共同开启分段，避免默认关闭后测到无效开关。
+- The configuration for the running instance has been immediately updated via the management interface to `segmented_downloads=false`, disabling automatic segmentation probing for subsequent requests.
+- In version 0.4.1, segmentation is disabled by default (both in the built-in defaults and the release configuration) and is now designated as an experimental feature; the option to enable it manually remains available. - Retains HTTP/2, connection reuse for verified TLS probes, IP preference, and caching of public resources; standard Range requests/resumable downloads are handled according to the client's original request.
+- The speed-testing platform now includes a master toggle for "segmentation" (chunked downloading) and a control group using a fixed public IP. In segmentation sub-experiments, the feature is enabled on both sides to ensure that a "disabled by default" setting doesn't lead to invalid test results.
 
-先前 0.4 的冷启动小文件收益不能作为大文件吞吐提速证据。默认启用下载试探的判断过于乐观，本版采用保守的普通单流策略，后续优化需要同时检查完整下载耗时和失败率。
+The performance gains for small files observed during cold starts in version 0.4 cannot be used as evidence for improved throughput for large files. The previous default approach—initiating "probing" downloads—was overly optimistic; this version adopts a more conservative, standard single-stream strategy. Future optimizations will require evaluating both total download duration and failure rates.

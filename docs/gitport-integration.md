@@ -1,69 +1,66 @@
-# GitPort 参考吸收与 0.3 验证
+# GitPort Integration and Version 0.3 Verification
 
-日期：2026-11-08。参考用户提供的本地源码 `I:\RcProject\gitport-github`，版本 0.5.7，修订 `391c2b1ff093eb865c218eecc88d5a92fb88494f`；源码来源为 [zhidian-cmd/gitport-github](https://github.com/zhidian-cmd/gitport-github)。实际对照程序为用户已经运行的 `D:\Download3\gitport-github.exe`，未修改其设置。
+Date: 2026-11-08. This assessment references the local source code provided by the user—`I:\RcProject\gitport-github`, version 0.5.7, revision `391c2b1ff093eb865c218eecc88d5a92fb88494f`—sourced from [zhidian-cmd/gitport-github](https://github.com/zhidian-cmd/gitport-github). The implementation was verified against the executable currently in use by the user, `D:\Download3\gitport-github.exe`, with its existing configuration left unchanged.
 
-本次吸收其可用机制，并用 GitHubTurbo 的 Schannel、系统接入和恢复架构实现；没有把另一个程序封装进来。默认仍是 `upstream=null`，不依赖用户的 10808 正向代理。
+The functional mechanisms from the source have been incorporated and implemented using the Schannel, system integration, and recovery architecture of GitHubTurbo; the original program itself has not been encapsulated. The default setting remains `upstream=null`, with no dependency on the user’s existing 10808 forward proxy.
 
-## 已实现的对应机制
+## Implemented Mechanisms
 
-| 参考设计与源码 | GitHubTurbo 0.3 的实现 | 约束 |
+| Reference Design & Source Code | GitHubTurbo 0.3 Implementation | Constraints |
 | --- | --- | --- |
-| `pool/seeds.json` 内置候选 | `assets/route-seeds.json`、`src/seeds.rs`；候选和实时 DoH 并发竞争 | 只保留 IP/域名，精确规则优先，公网过滤，TLS 验证原始主机名 |
-| `pool/edges.rs`、`latency.rs` 线路状态 | `src/health.rs`：按域名与线路的 EWMA、失败次数、分级冷却 | 连接错误 30–300 秒，421 一小时，429 五分钟，5xx 二十秒；429 不重放 |
-| `server/upstream.rs`、`pool` 的长连接复用 | `src/pool.rs`：跨前端连接共享同域名上游，协商 HTTP/2，回退 HTTP/1.1，延迟与负载参与选池 | 全局 96 连接、64 个池、h2 每连接最多 64 个流，90 秒闲置回收；不跨域共用 TLS 身份 |
-| 会话与内容分流 | `session_host` 会话域名单池 1 条，其他域名最多 4 条 | WebSocket 独立 HTTP/1.1 升级，另受全局连接上限控制；不自动重放 POST/push |
-| `page_cache.rs`、`redirect_memo.rs` 减少重复请求 | `src/content_cache.rs`、`forward.rs`：公共静态资源内存缓存，跨客户端命中 | 16 MiB、128 项、单项 2 MiB；最多 4 个收集器；尊重公开缓存指令、Vary、Age、条件请求；带 Cookie/认证/签名参数不进入缓存 |
-| `direct_split.rs` 多路 Range | `src/segmented.rs`：直连同源 4 路，独立连接，256 KiB 分段，有背压 | 至少 4 MiB，强 ETag、正确 206/Content-Range/长度、无压缩；最多 2 个下载，不混第三方镜像；首批未在三秒内完成或验证失败，保留原始单流继续 |
-| 设置面板、线路观察、清理与诊断 | `src/dashboard.html`、`control.rs`：四个即时开关、连接/缓存/冷却表、最近事件、清理、导出 | 本地 Host 校验；写操作需要专用请求头及本地 Origin；诊断不含请求路径、查询参数、Cookie、Token |
-| `desktop.rs` 托盘 | `src/tray.rs` 与原生恢复守护共用一个进程 | 双击打开面板，右键停止并恢复；无 WebView 常驻，无轮询等待引擎退出 |
-| 路由预热 | `main.rs`：非冷却的直连候选落盘，下次启动恢复 | 最长读取 24 小时内的记录；只是候选，不绕过 TLS 校验；可在面板清除 |
+| Built-in candidates in `pool/seeds.json` | `assets/route-seeds.json`, `src/seeds.rs`; concurrent race between built-in candidates and real-time DoH | Retains only IPs/domain names; precise rules take precedence; public network filtering; TLS verification uses the original hostname |
+| Path status from `pool/edges.rs`, `latency.rs` | `src/health.rs`: Tracks EWMA (Exponentially Weighted Moving Average) of latency, failure counts, and tiered cooldowns per domain/path | Cooldowns: 30–300s for connection errors, 1 hour for 421, 5 minutes for 429, 20 seconds for 5xx; 429 responses are not retried |
+| Long-lived connection reuse (`server/upstream.rs`, `pool`) | `src/pool.rs`: Shares upstream connections for the same domain across front-end connections; negotiates HTTP/2 (falls back to HTTP/1.1); latency and load factor into pool selection | Global limits: 96 connections, 64 pools; max 64 streams per H2 connection; 90-second idle timeout for reclamation; TLS identities are not shared across domains |
+| Session and content traffic splitting | 1 connection per pool for `session_host` domains; max 4 connections for other domains | WebSockets use independent HTTP/1.1 upgrades, subject to global connection limits; POST requests and PUSH streams are not automatically retried |
+| Request deduplication (`page_cache.rs`, `redirect_memo.rs`) | `src/content_cache.rs`, `forward.rs`: In-memory cache for public static resources, shared across clients | 16 MiB total, 128 entries, max 2 MiB per entry; up to 4 collectors; respects public cache directives, `Vary`, `Age`, and conditional requests; requests with Cookies, authentication, or signature parameters are excluded from the cache |
+| Multi-path Range requests (`direct_split.rs`) | | `src/segmented.rs`: Four concurrent, independent direct connections to the same origin; 256 KiB segments with backpressure. Requirements: minimum 4 MiB file size, strong ETag, valid 206/Content-Range/Content-Length headers, and no compression. Limited to 2 simultaneous downloads; third-party mirrors are excluded. If the initial segments fail to complete or verify within three seconds, the system reverts to the original single-stream download.
 
-HTTP/2 开关控制上游协商。开关变更落盘，清理共享池后新请求采用新策略；已有租用连接继续完成。Cache 命中不代表远端网络延迟变低，它省掉了远端请求。
+Dashboard, connection monitoring, cleanup, and diagnostics (`src/dashboard.html`, `control.rs`): Includes four real-time toggles, tables for active connections/cache/cooldown status, a log of recent events, cleanup utilities, and export functions. Local host verification is enforced; write operations require specific request headers and a local `Origin`. Diagnostic data excludes request paths, query parameters, cookies, and tokens.
 
-## 保留本项目实现的部分
+`desktop.rs` (System Tray): Shares a process with the native recovery daemon (`src/tray.rs`). Double-click to open the dashboard; right-click to stop or resume operations. No persistent WebView; no polling to wait for the engine to exit.
 
-继续使用每机独立 CA 与 CRL、原始主机名证书校验、NRPT/可恢复 hosts、Git 作用域证书配置、官方 SSH 443 ProxyCommand、原生异常恢复及登录恢复任务。保留多个 DoH 与区域采样、标准/无 SNI 竞争、公开 Release 的匿名官方 API 回退，以及可选 HTTP CONNECT 出口。
+Route Warm-up (`main.rs`): Non-cooldown direct-connection candidates are persisted to disk and restored upon the next launch. Records from the last 24 hours are loaded; these are merely candidates and do not bypass TLS verification. Entries can be cleared via the dashboard.
 
-没有照搬伪装成其他网站的 SNI/其他验证锚、BoringSSL 浏览器指纹、跨域名的 h2 合并、带会话的 HTML 缓存、头像跳转记忆、第三方镜像合流、CONNECT 首包分片，也没有加入第三方节点发现、安装器、自动更新或后台下载队列。它们不是本轮已经验收的功能。部分涉及新构建依赖、身份与缓存语义，部分需要独立网络收益证据；不能把“参考吸收”解释成完整功能等价。
+HTTP/2 toggles control upstream negotiation. Changes are persisted to disk; the shared connection pool is cleared, and new requests will follow the updated policy, while existing leased connections are allowed to complete. A cache hit eliminates the need for a remote request, though it does not imply lower network latency to the origin.
 
-仅精简候选数据直接来自参考项目，保留 Apache-2.0 全文及来源/修改说明：`third-party/gitport/LICENSE`、`NOTICE`。共享连接池、健康记录、缓存、分段、面板及测试为本项目的新实现。没有分发参考 exe、用户设置或私钥。
+## Retained Features
 
-## 验证方法
+The implementation continues to utilize: per-machine unique CA and CRL; original hostname-based certificate verification; NRPT (Name Resolution Policy Table) and recoverable `hosts` file entries; Git-scoped certificate configurations; official SSH 443 `ProxyCommand` integration; and native exception-recovery and login-recovery tasks. Also retained are: multiple DoH (DNS-over-HTTPS) providers with regional sampling; standard vs. non-SNI competitive connection attempts; fallback to anonymous official APIs (as used in public releases); and an optional HTTP CONNECT egress proxy. Features such as SNI/verification anchor masquerading (mimicking other websites), BoringSSL browser fingerprinting, cross-domain H2 multiplexing, session-aware HTML caching, avatar redirect persistence, third-party mirror aggregation, and fragmentation of the initial CONNECT packet have not been incorporated. Likewise, third-party node discovery, installers, auto-update mechanisms, and background download queues have not been included. These were not part of the scope for this round of validation. Some of these features involve new build dependencies, complex identity and caching semantics, or require independent evidence of network performance gains; "referencing and incorporating" should not be conflated with full functional equivalence.
 
-Rust 自动测试覆盖：真实本地 TLS 的流式上传/Range/Host 检查/错误证书拒绝/POST 不重放；两个客户端的 12 个并发请求共用一条 h2 上游；公共 CSS 命中与 Cookie 绕过；5 MiB 分段逐字节一致、错误 Content-Range 回退；h2 连接保留时 HTTP/1.1 Upgrade 隧道交互。配置与域名/地址边界、早到字节、半关闭、冷却与管理入口也有覆盖。
+Only the refined candidate data—derived directly from the reference project—has been included, with the full Apache-2.0 license text and source/modification notices preserved in `third-party/gitport/LICENSE` and `NOTICE`. The shared connection pool, health tracking, caching, data fragmentation, management dashboard, and testing suite are original implementations specific to this project. No executable files (`.exe`), user settings, or private keys from the reference project are distributed.
 
-17 项 Rust 测试通过，Windows x64 静态 CRT 目标的 clippy（所有 targets、warnings 为错误）通过；Python 黑盒验证显式代理拒绝、域名限制、512 KiB 字节中继和半关闭。浏览器实际打开管理面板，窄窗口无横向溢出，线路、开关和统计可见。开发机 `reports` 保存原始结果，不进入发行包。样本无法证明跨地区吞吐、所有登录流程、私有仓库/push/LFS、长期峰值或重启恢复已经验收。
+## Validation Methodology
 
-### 实际网络与系统恢复
+The project includes automated Rust tests covering: streaming uploads over actual local TLS, `Range` header handling, `Host` header validation, rejection of invalid certificates, and prevention of POST request replay. Tests also verify that 12 concurrent requests from two separate clients share a single upstream H2 connection; that public CSS assets are correctly cached while bypassing cookies; that 5 MiB data segments maintain byte-for-byte integrity; that the system gracefully falls back when encountering erroneous `Content-Range` headers; and that HTTP/1.1 `Upgrade` tunneling functions correctly while an H2 connection remains active. Additional coverage includes configuration and domain/address boundary handling, early-arrival bytes, half-closed connection states, connection cooldown logic, and the management interface.
 
-`reports/smoke-0.3.json` 不指定代理且保留证书校验，所有最终响应都经过本地 CA。首页、仓库页、API、Raw、源码 ZIP、Release 校验清单、CSS 均为 200。API 首轮暴露的候选通配符优先错误已修复，精确域名规则回归测试通过。该轮功能样本耗时依次约 52.82、18.19、2.07、0.49、0.86、2.25、3.04 秒；网页仍有波动，不能以少量小资源请求宣称全面提速。
+All 17 Rust tests have passed, and the codebase has cleared `clippy` checks (with all targets enabled and warnings treated as errors) for the Windows x64 static CRT build target. Python-based black-box testing confirms the rejection of unauthorized proxy requests, enforcement of domain restrictions, 512 KiB data relay, and proper handling of half-closed connections. Browser-based verification of the management dashboard confirms that the interface renders correctly in narrow windows without horizontal overflow, with all connection paths, toggles, and statistics visible. Raw test results are stored in the `reports` directory on the development machine and are not included in the release package. This sample set does not constitute validation for cross-region throughput, full login workflows, private repository operations (including `push` and LFS), long-term peak load performance, or recovery following a system restart.
 
-普通 `git clone --depth=1` 和后续 `git fetch` 成功，未指定单次代理参数，结果见 `reports/git-0.3.json`。Windows 生命周期验证了正常停止、强制结束引擎的守护恢复、损坏配置后的恢复；hosts/SSH 按字节恢复，Git 作用域设置恢复，拥有的 NRPT/CA/恢复任务移除，结束时重新启用。见 `reports/lifecycle-0.3.json`。
+### Network and System Recovery
 
-管理 API 的黑盒验证覆盖 Host、Origin、专用写入头、非法选项不变更状态，以及设置即时生效、落盘和恢复，见 `reports/control-0.3.json`。
+In `reports/smoke-0.3.json`, no proxy is specified, and certificate validation remains enabled; all final responses are routed through a local CA. The homepage, repository page, API, "Raw" view, source code ZIP, release checksum manifest, and CSS assets all returned HTTP 200 status codes. An initial issue—where wildcard-based domain rules were incorrectly prioritized—has been resolved, and regression tests for precise domain matching rules have passed. The execution times for this functional sample set were 52.82, 18.19, 2.07, 0.49, 0.86, 2.25, and 3.04 seconds, respectively. As web page response times remain volatile, it would be inaccurate to claim a comprehensive performance boost based solely on a few small-resource requests.
 
-### 大文件结果与策略修正
+Standard `git clone --depth=1` operations followed by `git fetch` were successful (without specifying a proxy); results are documented in `reports/git-0.3.json`. Lifecycle testing on Windows confirmed that the system handles graceful shutdowns, forced engine termination (with subsequent recovery), and recovery from corrupted configurations. This includes the restoration of `hosts` and SSH configurations, Git-scope settings, and the cleanup of NRPT entries, CA certificates, and recovery tasks—all of which are restored to their original state upon termination. See `reports/lifecycle-0.3.json`.
 
-13,661,485 字节的官方 CLI Release 在当前线路上未完成全文件验收：原始四路策略 120 秒收到 8,388,608 字节，普通单流同样超时、收到 3,923,975 字节，不能记为下载成功或发布者 SHA256 验证通过。作为补充，参考程序的同文件 1 MiB Range 请求在 20 秒后也仅收到 799,786 字节；这些并非同时、等配置的带宽对比。
+Black-box verification of the management API confirms that it correctly handles `Host` and `Origin` headers, specific write-operation headers, and invalid options (ensuring no state changes occur). It also verifies that configuration changes take effect immediately, are persisted to disk, and can be successfully recovered. See `reports/control-0.3.json`.
 
-因此最终版增加三秒首批试探，并一直保留原始下载响应：试探慢或 Content-Range 验证失败就继续原始流，避免重新请求整个文件。自动测试确认慢 Range 和错误 Range 回退均逐字节输出原来的 5 MiB，且没有额外完整 GET。测试能证明字节正确与回退机制，不能证明当前公网大文件下载已经更快。原始失败报告保留为 `reports/release-0.3-split-before.json`、`reports/release-0.3-single-before.json`。
+### Large File Handling and Strategy Adjustments
 
-### 资源采样
+A full-file verification of an official CLI release (13,661,485 bytes) could not be completed over the current network path. Using the original four-path strategy, only 8,388,608 bytes were received within 120 seconds; a standard single-stream request also timed out, receiving only 3,923,975 bytes. Consequently, these attempts cannot be classified as successful downloads, nor could the publisher’s SHA256 checksum be verified. Additionally, a 1 MiB range request for the same file, performed via a reference program, yielded only 799,786 bytes after 20 seconds. Note that these tests were not conducted simultaneously, nor were they performed under identical bandwidth configurations. Therefore, the final version introduces an initial three-second probing phase while maintaining the original download response mechanism: if the probe is slow or the `Content-Range` validation fails, the system reverts to the original stream, avoiding the need to re-request the entire file. Automated tests confirm that both slow-range and invalid-range scenarios trigger a fallback, resulting in the output of the original 5 MiB (byte-for-byte) without any additional full `GET` requests. While these tests verify the byte-level accuracy and the fallback mechanism, they do not prove that large-file downloads over the public internet are currently faster. The original failure reports have been preserved as `reports/release-0.3-split-before.json` and `reports/release-0.3-single-before.json`.
 
-上述大文件下载期间的一个采样：引擎工作集 15.38 MiB、私有内存 7.00 MiB；托盘守护工作集 9.16 MiB、私有内存 1.96 MiB。两者工作集合计约 24.54 MiB；同时参考程序约 24.31 MiB。它是瞬时采样，不能代表峰值、内存泄漏检查或不同功能开启状态下的公平排名。16 MiB 内容缓存填满后会额外占用内存。
+## Resource Sampling
 
-## 对照的解释范围
+A snapshot taken during the aforementioned large-file download shows: 15.38 MiB working set and 7.00 MiB private memory for the engine; 9.16 MiB working set and 1.96 MiB private memory for the tray daemon. The combined working set for both is approximately 24.54 MiB, compared to ~24.31 MiB for the reference program. This is a momentary sample and does not represent peak usage, a check for memory leaks, or a definitive performance ranking across different feature configurations. Note that the 16 MiB content cache will consume additional memory once filled.
 
-`scripts/compare-gitport.py` 对相同 Raw/CSS/Release 校验文件做两轮顺序交替下载，保留 TLS 校验并比较 SHA256。GitPort 使用其当前 7810 显式代理配置；本项目使用默认系统接入、无正向代理。参考程序的 MITM 当前关闭，未为比较而改变；本项目可能命中公共缓存和复用连接。
+## Scope of the Comparative Analysis
 
-因此它能回答“这台机器当前配置下的这些重复请求有没有变慢”，不能得出纯网络带宽、两个冷启动、相同内部功能开启状态下的通用排名。小校验文件不能证明大文件分段吞吐更快。所有数值应结合 `reports/comparison-0.3.json` 的配置、轮次、大小与哈希阅读。
+The script `scripts/compare-gitport.py` performs two rounds of sequential, alternating downloads for the same Raw/CSS/Release verification files, maintaining TLS validation and comparing SHA256 hashes. GitPort is tested using its current explicit proxy configuration (port 7810), while this project uses the default system network configuration without a forward proxy. The reference program’s MITM (Man-in-the-Middle) feature is currently disabled and remained unchanged for this comparison; this project may benefit from public cache hits and connection reuse.
 
-最终 exe 的两轮结果如下，单位秒，每格按第一轮/第二轮排列。12 次响应均为 200，同一文件的 SHA256 相同。第二轮 CSS 包含本项目的内存缓存收益；Raw 主要受连接复用与线路波动影响。
+Consequently, these results answer the question, "Have these repeated requests become slower under the current configuration on this specific machine?" They do not establish a general performance ranking based on raw network bandwidth, "cold start" scenarios, or identical internal feature sets. Furthermore, small verification files cannot demonstrate faster throughput for large-file segmented downloads. All figures should be interpreted in the context of the configurations, test rounds, file sizes, and hashes documented in `reports/comparison-0.3.json`. The results from two test runs of the executable are shown below (in seconds), with each cell formatted as "first run / second run." All 12 requests returned an HTTP 200 status, and the SHA256 hashes for the files remained consistent. The second-run results for CSS reflect the benefits of the project's internal memory caching, while the "Raw" results are primarily influenced by connection reuse and network fluctuations.
 
-| 内容 | GitHubTurbo | GitPort 当前配置 |
+| Content | GitHubTurbo | GitPort (Current Config) |
 | --- | ---: | ---: |
-| Raw README，13 字节 | 0.349 / 0.067 | 0.287 / 1.292 |
-| CSS，87,305 字节 | 0.478 / 0.008 | 3.658 / 0.572 |
-| Release 校验清单，1,971 字节 | 2.705 / 0.319 | 3.101 / 1.423 |
+| Raw README (13 bytes) | 0.349 / 0.067 | 0.287 / 1.292 |
+| CSS (87,305 bytes) | 0.478 / 0.008 | 3.658 / 0.572 |
+| Release Checksum List (1,971 bytes) | 2.705 / 0.319 | 3.101 / 1.423 |
 
-设置黑盒还验证了两个并发开关修改都被保留并一致落盘，防止快速点击时相互覆盖。最终正常停止/异常终止/损坏配置恢复在发布 exe 上重新执行通过。发行 exe 为 3,974,144 字节；便携包校验值以同目录 `.sha256` 文件为准。
+Black-box testing also confirmed that modifications to the two concurrency settings are correctly persisted to disk, ensuring that rapid, successive clicks do not cause one change to overwrite another. Furthermore, the application successfully passed verification for normal shutdown, abnormal termination, and recovery from a corrupted configuration file. The released executable is 3,974,144 bytes in size; for the portable package, please refer to the `.sha256` file located in the same directory for checksum verification.

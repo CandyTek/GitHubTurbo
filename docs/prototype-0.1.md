@@ -1,60 +1,58 @@
 # GitHubTurbo
 
-Windows 上的轻量 GitHub 访问加速原型。默认监听 `127.0.0.1:18080`，复用已有 HTTP 代理 `127.0.0.1:10808`。项目采用 Rust + Tokio；Windows TLS 探测使用系统 SChannel。
+A lightweight prototype designed to accelerate access to GitHub on Windows. It listens on `127.0.0.1:18080` by default and leverages an existing HTTP proxy at `127.0.0.1:10808`. The project is built using Rust and Tokio, utilizing the Windows SChannel API for TLS probing.
 
-它是 GitHub 专用的 **HTTP CONNECT 正向代理**。浏览器和 Git 继续访问原始域名、自行验证 GitHub 证书。完整 GitHub 网页涉及登录、Cookie、CSP、跳转和多个资源域名，直接映射成 localhost 反代不是本轮的主方案。
+It functions as an **HTTP CONNECT forward proxy** specifically for GitHub. Browsers and Git clients connect to the original domain names and perform their own verification of GitHub’s TLS certificates. Since a full GitHub web session involves logins, cookies, Content Security Policy (CSP) headers, redirects, and various resource domains, a simple localhost-based reverse proxy mapping is not the primary approach here.
 
-## 直接使用
+## Usage
 
-在 PowerShell 中执行：
+Run the following command in PowerShell:
 
 ```powershell
 & 'I:\RcProject\GitHubTurbo\dist\github-turbo.exe'
 ```
 
-配置默认读取 exe 旁的 `config.json`；没有该文件才读取当前工作目录。若已有实例监听 18080，不必重复启动。Ctrl+C 停止前台实例。程序不会修改系统代理、hosts、根证书、Git 全局配置或开机启动项。
+The program looks for a `config.json` file located next to the executable; if not found, it checks the current working directory. If an instance is already running on port 18080, there is no need to start another. Press `Ctrl+C` to stop a foreground instance. The program does not modify system proxy settings, the `hosts` file, root certificates, global Git configurations, or startup items.
 
-后台启动/停止可使用 `scripts/start.ps1` / `scripts/stop.ps1`。停止会立即关闭当前隧道。
+To start or stop the program in the background, use `scripts/start.ps1` or `scripts/stop.ps1`. Stopping the program will immediately terminate any active tunnels.
 
-状态地址：<http://127.0.0.1:18080/status>。
+Status page: <http://127.0.0.1:18080/status>.
 
-浏览器代理扩展/系统自动配置脚本可填：<http://127.0.0.1:18080/proxy.pac>。PAC 仅为所列 GitHub 域名使用此代理，其他域名直连；需保留其他代理规则时，将这些域名规则合并进现有客户端。PAC 没有自动安装。若已有 Xray TUN 或透明代理，所谓“直连”可能仍受它影响。
-
-单次 Git 操作：
+For browser proxy extensions or system Proxy Auto-Configuration (PAC) scripts, you can use: <http://127.0.0.1:18080/proxy.pac>. The PAC file routes only the specified GitHub domains through this proxy, while all other traffic connects directly. If you already have other proxy rules in place, you should merge these GitHub-specific rules into your existing configuration. The PAC file is not installed automatically. Note that if you are already using an Xray TUN or a transparent proxy, "direct" connections may still be routed through those systems. Single Git operation:
 
 ```powershell
 git -c http.https://github.com/.proxy=http://127.0.0.1:18080 ls-remote https://github.com/octocat/Hello-World.git HEAD
 git -c http.https://github.com/.proxy=http://127.0.0.1:18080 clone --depth=1 https://github.com/octocat/Hello-World.git
 ```
 
-也可使用 `scripts/git-turbo.ps1 clone <URL>`。大型仓库按实际需求使用 `--filter=blob:none`、`--sparse` 或 `--depth=1`，这些选项会改变本地历史/文件可用性，不强制开启。
+Alternatively, you can use `scripts/git-turbo.ps1 clone <URL>`. For large repositories, consider using `--filter=blob:none`, `--sparse`, or `--depth=1` based on your specific needs; these options alter local history or file availability and are not enabled by default.
 
-Release / Raw 下载：
+Downloading Releases / Raw files:
 
 ```powershell
 & 'I:\RcProject\GitHubTurbo\scripts\download.ps1' -Url 'https://raw.githubusercontent.com/octocat/Hello-World/master/README' -Output '.\README.download'
-# 可选：使用本机 aria2 的 4 路分段和续传
-& 'I:\RcProject\GitHubTurbo\scripts\download.ps1' -Url '<实际 Release HTTPS 链接>' -Output '.\package.zip' -Aria2 'D:\DengYuhua\Aria2\aria2c.exe'
+# Optional: Use local aria2 for multi-threaded (4-segment) downloading and resuming
+& 'I:\RcProject\GitHubTurbo\scripts\download.ps1' -Url '<actual Release HTTPS URL>' -Output '.\package.zip' -Aria2 'D:\DengYuhua\Aria2\aria2c.exe'
 ```
 
-下载脚本保持证书验证；大文件应额外对照发布者的 SHA256。分段只有在服务端支持 Range 且链路存在吞吐瓶颈时可能改善速度。aria2 是可选外部工具，主程序不依赖它。
+The download script maintains certificate verification; for large files, you should also verify the SHA256 hash provided by the publisher. Multi-segment downloading may improve speeds only if the server supports the `Range` header and there is a throughput bottleneck in your network connection. `aria2` is an optional external tool; the main program does not depend on it.
 
-## 已实现的策略
+## Implemented Strategies
 
-| 层面 | 行为 |
+| Aspect | Behavior |
 | --- | --- |
-| 域名分流 | GitHub、API、Raw、头像、静态资源、codeload、Release CDN 及列出的历史 S3 域名；拒绝其他目的地及非 443 端口 |
-| 自动选路 | 系统 DNS 的最多 8 个公网候选 IP 与 HTTP 上游并行探测，以验证证书的 TLS + HTTP HEAD 响应为依据 |
-| 本机默认策略 | `github.com` 固定代理，其他允许域名 `auto`；基于本轮网页正文慢、API/codeload 直连快的观测 |
-| DNS 故障 | 代理路线把域名交给上游解析；直连可配置精确域名的 `ip_overrides`，仍按原域名做 SNI 和证书校验 |
-| 重连与回退 | `auto` 在返回 CONNECT 200 前，建连失败可尝试另一条通过探测的路线 |
-| 资源上限 | 2 个 Tokio 工作线程、默认 64 个连接、4 组并行冷探测、128 个缓存条目；每隧道两个 16 KiB 复制缓冲区 |
-| 流式传输 | 不缓存正文，支持双向流和半关闭；空闲计时会随传输刷新，不限制持续下载总时长 |
-| 可观测性 | 本地 JSON 状态、字节统计、选路日志、诊断命令、可复跑的对比脚本 |
+| Domain Routing | GitHub, API, Raw, avatars, static assets, `codeload`, Release CDN, and specified legacy S3 domains are routed; all other destinations and non-443 ports are rejected. |
+| Automatic Path Selection | Up to 8 public IP candidates (resolved via system DNS) are probed in parallel alongside the HTTP upstream. Selection is based on successful TLS certificate validation and HTTP HEAD responses. |
+| Default Local Policy | `github.com` is pinned to the proxy; other permitted domains default to `auto`. This follows observations that web page content loads more slowly via proxy, while API/`codeload` requests are faster via direct connection. |
+| DNS Failures | For proxied routes, domain resolution is delegated to the upstream. For direct connections, `ip_overrides` can be configured for specific domains, while SNI and certificate validation are still performed using the original domain name. |
+| Reconnection & Fallback | In `auto` mode, if a connection attempt fails before receiving a `CONNECT 200` response, the system may attempt an alternative route that has passed the probing phase. |
+| Resource Limits | 2 Tokio worker threads, a default limit of 64 concurrent connections, 4 parallel "cold" probes, 128 cache entries, and two 16 KiB copy buffers per tunnel. |
+| Streaming | Content bodies are not cached; full-duplex streaming and half-close states are supported. Idle timers are reset during data transfer, with no hard limit on the total duration of a download. |
+| Observability | Local JSON status, byte-count statistics, routing logs, diagnostic commands, and reproducible comparison scripts. |
 
-`host_modes` 是精确主机名匹配，不继承给子域名。模式可为 `auto`、`proxy`、`direct`。全局 `mode` 只作用于没有覆盖项的域名；需要全局固定某模式时，同时清空 `host_modes`。改配置后重启生效。
+`host_modes` relies on exact hostname matching and does not apply to subdomains. Supported modes include `auto`, `proxy`, and `direct`. The global `mode` setting applies only to domains without an explicit override; to enforce a single global mode, clear the `host_modes` configuration. Changes take effect after a restart.
 
-## 诊断与验证
+## Diagnostics and Verification
 
 ```powershell
 & 'I:\RcProject\GitHubTurbo\dist\github-turbo.exe' diagnose
@@ -62,33 +60,33 @@ python 'I:\RcProject\GitHubTurbo\scripts\benchmark.py'
 & 'I:\RcProject\GitHubTurbo\scripts\dns-diagnose.ps1'
 ```
 
-`diagnose` 主动对 6 个域名分别测直连和代理；CDN 根路径的 4xx 只代表 HTTPS 可达，不能证明某个文件存在。`benchmark.py` 真正 GET 网页/API/Raw/源码压缩包/官方 Release 文件，记录耗时、下载字节、退出码和内容哈希。它使用系统 curl，每项有超时与 4 MiB 体积上限，顺序执行，不是受控带宽测试。默认需要本地服务已运行。
+The `diagnose` command actively tests both direct and proxied connections to six specific domains. Note that a 4xx HTTP status code from a CDN root path only confirms that the HTTPS endpoint is reachable; it does not verify the existence of any specific file. The `benchmark.py` script performs actual GET requests for web pages, APIs, raw files, source code archives, and official release assets, recording the time taken, bytes downloaded, exit codes, and content hashes. It utilizes the system's `curl` utility, with timeouts and a 4 MiB size limit applied to each request. Tests are executed sequentially and do not constitute a controlled bandwidth benchmark. By default, this requires a local service to be running.
 
-DNS 脚本对照系统解析与经现有代理访问的 Cloudflare DoH，不改 DNS/hosts，也不把一次快照永久写成固定 IP。需要测试 `ip_overrides` 时，从诊断结果选择候选地址并及时更新，不长期硬编码过期 CDN IP。
+The DNS diagnostic script compares system DNS resolution against Cloudflare DNS-over-HTTPS (DoH) accessed via your existing proxy. It does not modify your system DNS settings or `hosts` file, nor does it permanently hardcode IP addresses based on a single snapshot. If you need to test `ip_overrides`, select candidate addresses from the diagnostic results and update them as needed; avoid long-term hardcoding of potentially outdated CDN IP addresses.
 
-## 构建
+## Build
 
-已验证环境：Rust/Cargo 1.96.0，MSVC x64 工具链，Windows。运行不需要 Rust、Python、Node 或 Go。编译依赖锁定于 `Cargo.lock`；四项直接依赖为 Tokio、tokio-native-tls、serde、serde_json。Windows 下无需附带 OpenSSL；其他平台构建可能需要系统 OpenSSL。
+Verified environment: Rust/Cargo 1.96.0, MSVC x64 toolchain, Windows. No Rust, Python, Node, or Go runtime is required for execution. Dependencies are locked via `Cargo.lock`; the primary direct dependencies are `tokio`, `tokio-native-tls`, `serde`, and `serde_json`. On Windows, no external OpenSSL installation is required; builds on other platforms may require a system-installed OpenSSL.
 
 ```powershell
 cd I:\RcProject\GitHubTurbo
-# 若下载 crates 需要现有代理，仅对当前终端设置
+# If a proxy is required to download crates, set it for the current terminal session only
 $env:HTTPS_PROXY = 'http://127.0.0.1:10808'
 & .\scripts\build.ps1
 cargo clippy --all-targets --locked -- -D warnings
 python .\scripts\integration.py
 ```
 
-构建脚本保留已有 `dist/config.json`，首次构建才复制默认配置。
+The build script preserves any existing `dist/config.json` file; the default configuration is copied only during the initial build.
 
-## 原型边界
+## Prototype Limitations
 
-- HEAD 时延不等于大文件吞吐；自动模式可能选中握手快、正文慢的线路。可通过 `host_modes` 固定该域名，再复测完整下载。主程序没有宣称能提高现有代理本身的出口带宽。
-- 选路探测是独立连接，实际隧道会重新建连；缓存过期后的首次请求有额外开销。已建立的 TLS 流无法无缝切换线路，也不会自动重放 Git push 或登录请求。
-- 缓存到期后在下一次访问时重测；当前没有后台持续测速、吞吐学习、自动 DoH 缓存刷新或多上游节点池。
-- 上游仅支持无认证的本机 HTTP CONNECT；不直接提供 SOCKS、TUN、UDP/QUIC、SSH、GUI 或 Windows 服务安装。浏览器通过此代理使用 TCP HTTPS；HTTPS 隧道可承载客户端协商的 HTTP/2。
-- 普通 HTTP 明文请求返回 405，请使用 HTTPS URL。Git LFS、包管理器和第三方存储如跳转到未列出的域名会被拒绝；本轮未完成这些业务的端到端验证。
-- TLS 由客户端端到端处理，因此不提供 HTTPS 正文缓存。公开不可变资源的磁盘缓存应另建下载服务；带 Cookie/Authorization 的内容不应被公共缓存。
-- 本机已有代理是跨区域链路来源；若直连与该代理同时不可用，纯本地转发不能自行创造可用出口。
+- HEAD request latency is not equivalent to throughput for large files; the automatic mode might select a route with a fast handshake but slow data transfer. You can use `host_modes` to pin a specific domain and then re-test the full download. The core program does not claim to increase the egress bandwidth of any existing proxy you may already be using.
+- Route probing uses independent connections, meaning the actual tunnel will be re-established; the first request after a cache entry expires incurs additional overhead. Established TLS streams cannot be seamlessly switched to a different route, nor will the system automatically replay Git push operations or login requests.
+- Re-testing occurs upon the next access after a cache entry expires; there is currently no background continuous speed testing, throughput learning, automatic DoH cache refreshing, or support for a pool of multiple upstream nodes.
+- The upstream only supports unauthenticated local HTTP CONNECT; the software does not natively provide SOCKS, TUN, UDP/QUIC, SSH, a GUI, or a Windows service installer. Browsers use this proxy for TCP-based HTTPS; the HTTPS tunnel can carry HTTP/2 traffic as negotiated by the client.
+- Plain-text HTTP requests will return a 405 error; please use HTTPS URLs. Requests to domains not explicitly listed—such as those used by Git LFS, package managers, or third-party storage services—will be rejected; end-to-end validation for these specific use cases has not yet been completed.
+- TLS is handled end-to-end by the client, so no HTTPS payload caching is provided. Disk caching for public, immutable resources should be implemented via a separate download service; content containing cookies or authorization headers should not be stored in a public cache.
+- If an existing local proxy serves as the source for cross-region connectivity, and both a direct connection and that proxy are unavailable, the local forwarding mechanism cannot independently create a functional egress path.
 
-完整选型、依赖与资料见 `docs/research.md`；实测结论见 `docs/validation.md`。
+For a comprehensive overview of design choices, dependencies, and reference materials, please refer to `docs/research.md`; for empirical test results, see `docs/validation.md`.

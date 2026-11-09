@@ -1,56 +1,54 @@
-# GitHubTurbo 0.2 验证记录
+# GitHubTurbo 0.2 Verification Log
 
-日期：2026-11-08。Windows x64，默认 `upstream=null`。本版的目标是可直接试用的系统接入版本，尚未做公开稳定版的跨机器验收。
+Date: 2026-11-08. Windows x64, with default `upstream=null`. This version is intended as a system-integrated release ready for immediate trial; cross-machine validation for a public stable release has not yet been conducted.
 
-## 默认接入与网络
+## Default Integration and Networking
 
-`reports/smoke-0.2.json` 是加入区域解析采样后的完整检查。脚本在系统会话进入 enabled 状态后执行，不指定正向代理，保留完整证书校验，并确认每个最终 HTTPS 响应的证书链包含 GitHubTurbo 本地 CA，避免把绕过程序的直连请求误算为成功。
+`reports/smoke-0.2.json` contains a comprehensive check, including sampled regional DNS resolution. The scripts were executed after the system session reached an "enabled" state. No forward proxy was specified, full certificate validation was maintained, and it was verified that the certificate chain for every final HTTPS response includes the GitHubTurbo local CA—ensuring that direct connections bypassing the software are not incorrectly counted as successful.
 
-| 场景 | 状态 | 本轮完整请求耗时 | 大小 |
+| Scenario | Status | Total Request Time (This Run) | Size |
 | --- | --- | ---: | ---: |
-| GitHub 首页 | 200 | 27.44 秒 | 525,303 字节 |
-| 仓库网页 | 200 | 15.06 秒 | 182,014 字节 |
-| GitHub API | 200 | 2.94 秒 | 5,566 字节 |
-| Raw README | 200 | 2.55 秒 | 13 字节 |
-| 源码 ZIP | 200 | 4.10 秒 | 351 字节 |
-| CLI Release 校验清单 | 200，一次跳转 | 5.31 秒 | 1,971 字节 |
-| 页面 CSS | 200 | 2.64 秒 | 87,305 字节 |
+| GitHub Homepage | 200 | 27.44 s | 525,303 bytes |
+| Repository Page | 200 | 15.06 s | 182,014 bytes |
+| GitHub API | 200 | 2.94 s | 5,566 bytes |
+| Raw README | 200 | 2.55 s | 13 bytes |
+| Source Code ZIP | 200 | 4.10 s | 351 bytes |
+| CLI Release Checksum List | 200 (with one redirect) | 5.31 s | 1,971 bytes |
+| Page CSS | 200 | 2.64 s | 87,305 bytes |
 
-这些是少量请求的功能样本，不是带宽基准，也不能据此承诺所有网络更快。冷启动的 DNS、握手竞争、区域线路失败回退会增加延迟；首页 27 秒仍有明显优化空间。早期构建出现过首页/API 500、504，记录在 `reports/smoke-0.2-before-buffering.json`、`reports/smoke-0.2-single-region.json` 等文件，没有将失败归入成功。
+These are functional samples based on a limited number of requests; they do not serve as bandwidth benchmarks, nor do they imply that all network operations will be faster. Factors such as cold-start DNS resolution, handshake contention, and failover mechanisms for regional network paths can increase latency. The 27-second load time for the homepage, in particular, leaves significant room for optimization. During early build stages, 500 and 504 errors occurred on the homepage and API endpoints—documented in files such as `reports/smoke-0.2-before-buffering.json` and `reports/smoke-0.2-single-region.json`. These failures were not misclassified as successes.
 
-诊断发现本机到两个境外 DoH 启动地址不可达，默认可用解析只返回同一区域地址。通过阿里 DoH 的 EDNS 子网采样取得不同区域候选，交由真实 TLS 校验和请求回退选择。没有在主程序中硬编码 GitHub IP。EDNS 子网参数采用公开解析器网络前缀作为解析视角样本，不上传用户真实内网网段；它不能保证某个返回 IP 属于固定地区。[阿里 DNS API 参数说明](https://help.aliyun.com/en/dns/httpdns-doh-json-api)
+Diagnostics revealed that the local machine could not reach two overseas DoH (DNS-over-HTTPS) bootstrap addresses, and the default available resolver returned only addresses within the same region. To address this, the system now uses EDNS subnet sampling via Alibaba’s DoH service to obtain candidates from various regions, followed by actual TLS verification and a fallback mechanism for request routing. No GitHub IP addresses are hardcoded into the main program. The EDNS subnet parameter utilizes the network prefix of a public resolver as a reference point for DNS resolution; it does not transmit the user’s actual internal network segment. Note that this method does not guarantee that a returned IP address belongs to a specific, fixed geographic region. [Alibaba DNS API Parameter Documentation](https://help.aliyun.com/en/dns/httpdns-doh-json-api)
 
-本轮另成功完整下载 3proxy 1.0.3 x64 Release：1,881,325 字节，SHA256 为 `f831b550c532cd6c8daa11ec8cdd6bcfd62a37701a5bd8367a4bfa06a0660251`，与官方发布 API 的 digest 一致。该项在中间构建完成，原文件保存在 `reports/v02-3proxy.zip`。
+In this iteration, the 3proxy 1.0.3 x64 Release (1,881,325 bytes) was successfully downloaded in its entirety. Its SHA256 hash is `f831b550c532cd6c8daa11ec8cdd6bcfd62a37701a5bd8367a4bfa06a0660251`, which matches the digest provided by the official release API. This file was retrieved during an intermediate build stage and is preserved as `reports/v02-3proxy.zip`.
 
-## Git 与 SSH
+## Git and SSH
 
-- 未给 Git 指定代理的真实 `git ls-remote`、浅克隆和后续 fetch 成功。
-- 最终静态 CRT 发行构建再次完成真实 fetch，Raw 下载返回 200；核心逻辑与上表构建相同，切换 CRT 链接方式后没有重新跑整组耗时比较。
-- SSH ProxyCommand 连接官方 SSH 443 入口，收到 `SSH-2.0-9bd49d50` 标识。没有测试账户认证、私有仓库 SSH 克隆或修改 known_hosts。
-- 没有自动重放 Git push/POST；公开仓库测试不能证明私有仓库、LFS 和复杂登录流程全部兼容。
+- Operations including `git ls-remote`, shallow cloning, and subsequent `fetch` commands were successful, even without an explicit proxy configured for Git.
+- During the final static CRT (C Runtime) build, a full `fetch` was performed again, with the raw download returning an HTTP 200 status. The core logic remains identical to the build mentioned in the table above; the entire suite of time-consuming comparative tests was not re-run after switching the CRT linking method.
+- An SSH connection established via `ProxyCommand` to the official SSH 443 endpoint returned the identification string `SSH-2.0-9bd49d50`. No authentication for test accounts, SSH cloning for private repositories, or modification of `known_hosts` is performed.
+- There is no automated replay of `git push` or POST requests; testing with public repositories does not guarantee compatibility with private repositories, LFS, or complex login workflows.
 
-## 自动化与恢复
+## Automation and Recovery
 
-8 项 Rust 测试通过，包括：域名/地址限制、配置限制、缓存容量、DNS A/AAAA/HTTPS/拒绝响应、早到隧道字节、双向半关闭，以及带真实本地 TLS 的 512 KiB 二进制上传/回传、Range 206、Host 不匹配 421、错误证书名称拒绝、POST 503 不重放。
+8 Rust tests passed, covering: domain/address restrictions, configuration limits, cache capacity, DNS (A/AAAA/HTTPS/refusal responses), early-arrival tunnel bytes, bidirectional half-closure, as well as 512 KiB binary uploads/downloads using actual local TLS, `Range 206` requests, `421` status codes for `Host` mismatches, rejection of invalid certificate names, and the non-replay of `POST 503` responses.
 
-`cargo clippy --all-targets --locked -- -D warnings` 通过；最终 Windows x64 静态 CRT 目标再次运行全部单元测试。黑盒集成测试确认显式代理兼容模式、上游拒绝和二进制隧道传输。
+`cargo clippy --all-targets --locked -- -D warnings` passed; all unit tests were also executed against the final Windows x64 static-CRT target. Black-box integration tests confirmed compatibility with explicit proxy modes, upstream rejection scenarios, and binary tunnel transmission.
 
-`scripts/lifecycle.ps1` 对真实 Windows 设置执行了三组验证，并在结束时重新启用程序：
+`scripts/lifecycle.ps1` performed three sets of validations on a live Windows environment, ensuring the program was restored to its original state upon completion:
 
-1. 正常停用：hosts/SSH 无外部编辑时按字节恢复，Git 域名配置恢复，拥有的 NRPT、CA 信任与登录恢复任务删除。
-2. 强制结束引擎：原生守护进程触发恢复，相同检查通过。
-3. 故意损坏默认 config.json：Recover.cmd 的同等命令仍能恢复，随后还原测试前配置文件。
+1. Graceful deactivation: Restored `hosts` and SSH files to their original byte-for-byte state (assuming no external modifications), reverted Git domain configurations, and removed tasks related to NRPT, CA trust, and login recovery.
+2. Forced engine termination: The native daemon triggered the recovery process, which passed the same set of checks.
+3. Intentional corruption of the default `config.json`: The recovery command (equivalent to `Recover.cmd`) successfully restored the configuration, after which the pre-test configuration file was reinstated.
 
-结果见 `reports/lifecycle-0.2.json`。当前尚未实际重启计算机验证登录恢复任务，只验证任务创建及清理，不能将它记为重启测试通过。
+Results are available in `reports/lifecycle-0.2.json`. Note that an actual system reboot to verify the login recovery task has not been performed; only the creation and cleanup of the task were validated. Therefore, this cannot be considered a verified "reboot test" success.
 
-## 资源与分发
+## Resources and Distribution
 
-最终静态 CRT exe 为 3,271,680 字节。dumpbin 的导入依赖只包含 Windows 系统 DLL，不再依赖 VCRUNTIME140.dll；未在未安装开发工具的全新机器上实测。
+The final static-CRT executable is 3,271,680 bytes. `dumpbin` analysis shows that import dependencies are limited to Windows system DLLs, with no remaining dependency on `VCRUNTIME140.dll`. (Note: This has not yet been tested on a "clean" machine—one without development tools installed.) Measurements taken after completing the static build integration and executing actual requests: the engine’s working set is 11.46 MiB (with 3.88 MiB of private memory), and the native daemon’s working set is 6.60 MiB (with 1.58 MiB of private memory), totaling approximately 18.1 MiB for the working set. These are sampled values, not peak concurrency figures or results from leak testing.
 
-完成静态构建接入与实际请求后的采样：引擎工作集 11.46 MiB、私有内存 3.88 MiB；原生守护进程工作集 6.60 MiB、私有内存 1.58 MiB。合计约 18.1 MiB 工作集。这是采样值，不是并发峰值或泄漏测试。
+The portable package is generated based on an explicit file manifest, containing only the executable, default configuration, start/stop/recovery scripts, download scripts, a README, a list of dependencies, and licenses. Local state, private keys, `hosts` file backups, session data, and development logs are excluded; the contents of the ZIP archive have been verified against the manifest. The final file size and SHA256 checksum are as specified in the corresponding `.sha256` files within the `packages` directory and in `reports/artifact-0.2.json`.
 
-便携包采用明确文件清单生成，只包含 exe、默认配置、启停恢复脚本、下载脚本、README、依赖清单与许可。排除本机 state、私钥、hosts 备份、会话和开发日志，打包后验证 ZIP 条目。最终大小和 SHA256 以 `packages` 中对应的 sha256 文件、`reports/artifact-0.2.json` 为准。
+## Pending Validation
 
-## 尚需验收
-
-完整浏览器登录与全部资源瀑布、私有仓库/push/LFS、非 OpenSSH 客户端、独立证书库、显式远程代理、自带 DoH/固定 IP 的程序、多用户与服务账户、长期驻留、重启恢复、并发峰值和跨地区吞吐尚未完整验证。发行包未做代码签名、安装器及自动更新，不将本版称为公开稳定版。
+The following scenarios have not yet been fully validated: full browser-based login and complete resource waterfall loading; private repository operations (including `push` and LFS); usage with non-OpenSSH clients; independent certificate stores; explicit remote proxies; applications with built-in DNS-over-HTTPS (DoH) or hardcoded IP addresses; multi-user and service account configurations; long-term persistent operation; recovery after restarts; peak concurrency; and cross-region throughput. As this release lacks code signing, an installer, and an auto-update mechanism, it is not designated as a public stable release.

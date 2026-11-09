@@ -1,62 +1,58 @@
-# 0.4：先测量，再逐项改进
+# 0.4: Measure First, Then Improve Incrementally
 
-本机日期 2026-11-08。Windows x64，默认不使用正向代理。Rust 1.96、curl 8.13 Schannel、Git 2.45.1。冻结的 0.3 exe SHA256 为 `d704dbef7b034087d5441bbb68f06995b62d2c7496a1c8f253f3155a14bb90c5`。
+Date: 2026-11-08. Environment: Windows x64; no forward proxy used by default. Tools: Rust 1.96, curl 8.13 (with Schannel), Git 2.45.1. The SHA256 hash for the frozen 0.3 executable is `d704dbef7b034087d5441bbb68f06995b62d2c7496a1c8f253f3155a14bb90c5`.
 
-## 可重复的真实网络平台
+## A Reproducible, Realistic Network Platform
 
-入口为 `bench/Start.cmd`，默认 `http://127.0.0.1:18190/`。支持独立 DNS 直连、冻结版本、当前构建、现有 GitPort 和可选 HTTP 代理。加速器实例运行在独立端口，使用仅供该实例的 CA，不执行系统接入。已实际验证网页启动/停止接口、并发运行拒绝、取消后的进程/临时正文清理与 hosts 不变。
+The entry point is `bench/Start.cmd`, defaulting to `http://127.0.0.1:18190/`. The platform supports direct connections (with independent DNS resolution), frozen versions, current builds, existing GitPort configurations, and optional HTTP proxies. Each accelerator instance runs on a dedicated port and utilizes a unique Certificate Authority (CA) scoped exclusively to that instance, without integrating into the host system. Functionality has been verified for web-based start/stop controls, prevention of concurrent execution, cleanup of processes and temporary files upon cancellation, and the preservation of the system `hosts` file.
 
-平台提供网页、Raw、CSS、API、Release、Range 和 Git 浅克隆/fetch/fsck。测试集固定内容或语义、预期大小和哈希；完整 Release 校验 GitHub 发布 API 给出的 SHA256。1 MiB Range 的哈希取自多次整文件 SHA256 验证成功的同一官方文件前缀。Git 测试核对固定提交；中型测试使用 curl 的固定标签 `curl-8_13_0`，提交 `1c3149881769e7bd79b072e48374e4c2b3678b2f`。
+The platform provides support for web pages, raw data, CSS, APIs, releases, byte-range requests, and Git operations (shallow clone, fetch, and fsck). Test datasets consist of fixed content (or semantically consistent data) with predefined expected sizes and hashes; for full releases, the SHA256 hash is verified against the value provided by the GitHub Releases API. Hashes for 1 MiB range requests are derived from the prefix of an official file that has been verified multiple times via full-file SHA256 checks. Git tests target specific commits; the medium-scale test uses the Git tag `curl-8_13_0` (commit `1c3149881769e7bd79b072e48374e4c2b3678b2f`). Data for every attempt—including success/failure status, timeouts, raw latency, effective throughput, content validation, application statistics, binary hashes, and configuration—is saved. Failed attempts are excluded from "successful latency" metrics but are always factored into the success rate. Results can be exported as JSON or offline HTML, with raw temporary response bodies and headers stripped out. An execution lock prevents simultaneous testing from the web interface and the CLI, ensuring they do not compete for bandwidth.
 
-保存每次成功、失败、超时、原始耗时、有效吞吐、内容校验、应用统计、二进制哈希和配置；失败样本不会进入“成功耗时”，但始终进入成功率。导出 JSON 与离线 HTML，原始临时正文及响应头会清理。运行锁防止网页和 CLI 同时测试抢带宽。
+The initial formal A/A calibration was conducted using the same "0.3" executable version, incorporating an independent direct-connection test. The test spanned three rounds across four scenarios, covering both "cold" (initial) and "warm" (subsequent) states, with a 72/72 success rate. The comparison ratios were mostly close to 1; this serves to validate the noise levels and measurement methodology and should not be interpreted as an optimization result. Recorded under: `20261108-182005-137a68`.
 
-首轮正式 A/A 校准使用同一 0.3 exe，加入独立直连：三轮、四场景、冷热两态，72/72 成功。配对比值多数接近 1；这是验证噪声和测量方法，不能视为优化成果。记录 `20261108-182005-137a68`。
+## Item 1: Reusing Verified TLS Probe Connections
 
-## 第一项：复用已经验证的 TLS 探测连接
+In previous versions, the TLS probe connection was discarded after the probe was completed, forcing the connection pool to perform a new handshake. Version 0.4 retains a small number of verified probe connections; actual requests retrieve these based on domain, route, and ALPN configuration, eliminating the need for a second connection setup. A maximum of 16 connections are retained, with a reuse window of three seconds; changing settings or reselecting routes clears the pool. Upstream raw hostname and certificate chain validation remain in effect.
 
-旧版先完成 TLS 探测，再丢弃连接，由连接池重新握手。0.4 保留少量已验证的探测连接，实际请求按域名、线路及 ALPN 配置取用，省去第二次建连。最多保留 16 条，只有三秒内的连接可复用，设置切换和重选线路会清除。上游原始主机名及证书链校验仍然执行。
+Using the same build, with `probe_reuse` toggled between disabled and enabled, a three-round comparison in the "cold" state yielded a 24/24 success rate. Record `20261108-183131-6c9ff3`:
 
-同一构建，仅 `probe_reuse` 关闭/开启，三轮冷状态对照，24/24 成功。记录 `20261108-183131-6c9ff3`：
-
-| 场景 | 关闭时耗时中位数 | 开启时耗时中位数 | 逐对耗时比值中位数 |
+| Scenario | Median Duration (Disabled) | Median Duration (Enabled) | Median Pairwise Ratio |
 | --- | ---: | ---: | ---: |
-| Raw | 0.411 秒 | 0.238 秒 | 1.72× |
-| CSS | 0.499 秒 | 0.249 秒 | 1.72× |
-| Release 校验清单 | 1.805 秒 | 0.933 秒 | 1.93× |
-| 小仓库浅克隆 | 1.938 秒 | 1.422 秒 | 1.36× |
+| Raw | 0.411 s | 0.238 s | 1.72× |
+| CSS | 0.499 s | 0.249 s | 1.72× |
+| Release Checklist | 1.805 s | 0.933 s | 1.93× |
+| Small Repository Shallow Clone | 1.938 s | 1.422 s | 1.36× |
 
-这些是本机小样本，不能承诺其他地区同样幅度。此项默认开启。独立 TLS 测试还确认实际请求使用同一条已验证连接，并且 HTTP/2 开关变化后不会误用不兼容的探测连接。
+These results are based on a small-scale local sample; the same magnitude of improvement cannot be guaranteed for other regions. This feature is enabled by default. Separate TLS testing confirms that actual requests utilize the same verified connection, and that toggling the HTTP/2 setting does not lead to the improper reuse of incompatible probe connections.
 
-## 第二项：记住不利的分段试探
+## Item 2: Remembering Unfavorable Range Probing Attempts
 
-对同一主机、路径、强 ETag、长度及线路，将试探失败、过慢或单流先胜的结果暂存十分钟，最多 512 项，不保存完整 URL 或认证参数。IP/TLS 方式、对象版本变化后重新判断，清空线路可清除记忆。
+For a given host, path, strong ETag, content length, and network path, the system will cache results—such as probe failures, excessive latency, or instances where a single-stream request outperformed the multi-stream probe—for ten minutes (up to a maximum of 512 entries). Full URLs and authentication parameters are not stored. The status is re-evaluated if the IP/TLS configuration or object version changes; clearing the network path cache will also purge these stored entries.
 
-受控真实 TLS 测试确认：第一次遇到慢 Range 后继续原始 5 MiB 响应；第二次不再重复四路探测，只发送原始 GET，内容逐字节一致。公网记录 `20261108-183410-ebed82` 包含超时和失败；健康 CDN 场景没有证明稳定速度收益，不能只引用其中一对较快的结果。此项主要避免已知无收益的重复开销，默认开启。
+Controlled, real-world TLS testing confirms that if a slow "Range" request is encountered, the system proceeds with the original 5 MiB response; upon a subsequent request, it skips the four-stream probe and issues a standard GET request instead, ensuring byte-for-byte consistency. Public network record `20261108-183410-ebed82` includes instances of timeouts and failures; in scenarios involving a healthy CDN, no consistent speed benefit was demonstrated, so one cannot selectively cite only the faster individual results. This feature is primarily intended to avoid redundant overhead in cases where no benefit is expected; it is enabled by default.
 
-## 第三项：有界的分段流水线
+## Item 3: Bounded Segmented Pipelining
 
-用持续在途的请求与有界乱序缓存替代逐批等待：四个在途请求，包含在途及已完成分段最多八片（每片 256 KiB），仍按字节顺序输出并检查 ETag、区间及长度。受控测试确认慢队首还未完成时，可以继续处理后续区间，最终字节完全一致。
+Instead of waiting for requests to complete in batches, this approach utilizes a continuous stream of in-flight requests combined with a bounded out-of-order buffer. It supports up to four concurrent in-flight requests, covering a maximum of eight segments (256 KiB each)—whether currently in transit or already completed. The output remains strictly ordered by byte offset, with ETag, range, and length verification performed accordingly. Controlled testing confirms that if the initial segment (the "head of the line") is delayed, subsequent ranges can still be processed; the final byte sequence remains identical.
 
-公网记录 `20261108-183206-6c0981`：12 次完整 Release 均校验成功，但冷状态逐对比值中位数约 0.77×，热状态约 1.06×，没有稳定收益。保留实现与单项实验，`range_pipeline` 默认关闭。它尚未实现 GitPort 更完整的吞吐调度和慢分段尾部任务转移。
+Record `20261108-183206-6c0981`: All 12 full-scale release tests passed verification. However, the median performance ratio (compared to the baseline) was approximately 0.77× for "cold" (uncached) states and 1.06× for "warm" (cached) states, showing no consistent performance gain. While the implementation and experimental code are retained, `range_pipeline` remains disabled by default. It currently lacks the more sophisticated throughput scheduling and "slow-tail" segment task migration found in GitPort.
 
-## 第四项：单流与四路试探首批竞速
+## Item 4: Race Between Single-Stream and Four-Way Probing for the Initial Chunk
 
-保留原始响应，一边检查原始流、一边验证四路试探；先完成首批 1 MiB 的方案胜出。若单流胜出、分段错误或三秒超时，则继续原始流，已检查的字节、正文长度和 trailers 会放回，不重新发完整 GET。对负载快慢变化比固定开启分段更有适应性，但首批快不等于整文件始终快。
+This method maintains the original response stream while simultaneously initiating four-way probing requests. The approach that completes the first 1 MiB of data first "wins." If the single-stream approach wins, or if a segment error or a three-second timeout occurs, the system reverts to the original stream. Any bytes already verified, along with the body length and trailers, are preserved—avoiding the need to re-issue a full GET request. This offers better adaptability to fluctuating load speeds compared to always-on segmentation; however, a faster start does not guarantee faster completion for the entire file.
 
-记录 `20261108-184109-fe70ff`：同一构建、只切换 `adaptive_split`，三对完整 Release 全部通过官方 SHA256，开启方两对较快，逐对耗时比值中位数约 1.76×。**分别汇总的耗时中位数为关闭 12.57 秒、开启 13.33 秒，并未下降**；逐对比值和各自中位数不是同一统计量，不能用其中一个隐藏另一个。本轮网络波动明显，保留全部逐次结果，不据此宣称大文件全面提速。此项按已收到数据作选择，默认开启，仍可独立关闭对照。
+Record `20261108-184109-fe70ff`: Using the same build, with only the `adaptive_split` feature toggled, three sets of full-scale releases all passed official SHA256 verification. In two of these sets, the version with `adaptive_split` enabled was faster, with a median performance ratio of approximately 1.76×. **Aggregated median completion times were 12.57 seconds (disabled) versus 13.33 seconds (enabled)—showing no improvement.** Since individual performance ratios and overall median times are distinct statistical metrics, one cannot be used to obscure the other. This round of network fluctuation was significant; all individual test results have been retained. We do not claim, based on these findings, that there is a universal speedup for large files. This feature is enabled by default—based on the data received—but can be toggled off independently for comparison.
 
-## 正确性与恢复
+## Correctness and Recovery
 
-21 项 Rust 测试通过；Windows 静态 CRT 目标 clippy 所有 targets 以 warnings 为错误通过；平台 11 项测试通过，覆盖失败计数、配对约束、文件校验、请求头脱敏、接口保护、单项实验、运行锁与跨进程取消。
+21 Rust tests have passed. For the Windows static CRT target, all `clippy` checks passed (with warnings treated as errors). 11 platform-specific tests passed, covering failure counting, pairing constraints, file integrity verification, request header sanitization, API protection, individual experimental tasks, execution locks, and cross-process cancellation.
 
-最终 0.4 已通过真实 Windows 的正常停用、强制结束引擎自动恢复、损坏配置后恢复，随后重新启用；hosts/SSH 字节恢复，Git 设置恢复，拥有的 NRPT/CA/恢复任务移除。管理 API 即时设置、并发写入与保存恢复通过，显式代理黑盒字节中继通过。详见 `reports/lifecycle-0.4.json`、`reports/control-0.4.json`、`reports/bench-api-0.4.json`。
+Version 0.4 has been validated for robust recovery: it handles graceful deactivation, automatic engine recovery following a forced termination, and restoration after configuration corruption—all followed by successful reactivation. It also supports the restoration of `hosts`/SSH byte configurations and Git settings, as well as the cleanup of NRPT/CA entries and recovery tasks. Management API configuration, concurrent write/save operations, and explicit proxy byte-relaying have all been verified. For full details, please refer to `reports/lifecycle-0.4.json`, `reports/control-0.4.json`, and `reports/bench-api-0.4.json`.
 
-当前测量不涵盖完整浏览器渲染/FCP、登录态、私有仓库、push/LFS、长期峰值与跨地区总体效果。逐次 curl 使用独立进程，热态复用的是加速器内部连接；直接访问的浏览器自身也能复用连接和缓存，本平台的小请求结果不能直接等同于浏览器页面提速比例。
+Current measurements do not account for full browser rendering (e.g., FCP), login states, private repositories, `git push`/LFS operations, long-term peak-load performance, or cross-regional effects. While individual `curl` tests utilize separate processes, the accelerator reuses internal connections for "warm" (active) states. Similarly, browsers can reuse connections and cache; therefore, the results for small requests on this platform cannot be directly equated to the speedup ratio for full browser-rendered pages.
 
-## 最终构建回归
+## Final Build Regression
 
-`20261108-185049-5f0266` 对冻结 0.3、最终 0.4 与独立直连进行两轮冷热测试，覆盖 Raw、CSS、Release 清单、仓库 HTML、API、小仓库、中型 curl 仓库及 1 MiB Range，共 96 个样本，88 成功、8 超时。
+For build `20261108-185049-5f0266`, two rounds of "cold" and "warm" testing were conducted—comparing the frozen 0.3 version, the final 0.4 version, and a direct (unaccelerated) connection. The test suite covered Raw data, CSS, Release manifests, repository HTML, APIs, small repositories, medium-sized `curl`-based repository fetches, and 1 MiB range requests. Out of 96 total samples, 88 were successful, and 8 resulted in timeouts. For the Raw/CSS/Release, manifest, web page, API, and small-repository categories, the success rate was 72/72. For the "Range" category, the success rate was 10/12, with two timeouts occurring in the "frozen" (static/archived) version. For medium-sized repositories, the success rate was 6/12, with timeouts observed across all three transport routes. Failed attempts have not been removed from the records. Medium-sized repositories and sustained throughput remain the primary focus for future development; it should be clarified that the "cold start" performance gains seen in small repositories do not imply that cloning speeds have improved across the board for all repository types.
 
-Raw/CSS/Release 清单/网页/API/小仓库合计 72/72 成功；Range 为 10/12 成功，冻结版两次超时；中型仓库为 6/12 成功，三条路线均出现超时。未删去失败记录。中型仓库与持续吞吐仍是后续重点，不将小仓库的冷启动收益宣传成所有克隆都变快。
-
-下一批应由平台数据决定：真实传输速率与完成时间预测、慢段剩余任务转移、跨重启的带过期策略的线路评分、头像跳转记忆。它们尚未在 0.4 中宣称完成。
+The next phase of development will be guided by platform data, focusing on: real-world transfer rate and completion-time forecasting; the reassignment of remaining tasks from "slow" segments; cross-restart route scoring (incorporating expiration policies); and the caching of redirect paths for avatars. These features have not yet been marked as complete in the 0.4 release.

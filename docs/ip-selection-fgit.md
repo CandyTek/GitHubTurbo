@@ -1,31 +1,30 @@
-# 用户 FGit Release 的 IP 实测
+# Empirical IP Testing for FGit Releases
 
-对象：用户在普通 Edge 下载的 `https://github.com/fastgh/fgit/releases/download/v1.2.0/fgit.exe`，7,531,520 字节。测试中所有本地 GitHub 加速引擎保持关闭，未改 hosts、NRPT、证书或系统代理，也没有执行下载文件。
+Target: `https://github.com/fastgh/fgit/releases/download/v1.2.0/fgit.exe` (7,531,520 bytes), downloaded via the standard Microsoft Edge browser. During testing, all local GitHub acceleration engines were disabled. No modifications were made to the `hosts` file, NRPT (Name Resolution Policy Table), certificates, or system proxy settings, and the downloaded file was not executed.
 
-## 方法
+## Methodology
 
-先通过系统直连下载参考文件。GitHub Release API 的 `digest` 为 null，因此这里只以通过 TLS 验证的参考文件 SHA256 比较各出口内容，**不是发布者签名或官方摘要验证**。
+A reference file was first obtained via a direct system connection. Since the GitHub Release API returns `null` for the `digest` field, the integrity of the content from each egress point was verified by comparing its SHA256 hash against that of the reference file (which was validated via TLS). Note that this does **not** constitute verification of the publisher’s digital signature or an official checksum.
 
-参考文件 SHA256：`b867b472001a9222bb5b6f89a09e73567b6583f9f75a7aff6304a49ef14d0995`。完整下载使用 Node.js 内置 HTTP/2，单流、相同 CDN 对象、每次新连接，保留原始域名 SNI 与证书校验；没有使用本地反代或第三方镜像。它用于控制协议和客户端变量，并非自动化操作 Edge 的原始下载。
+Reference file SHA256: `b867b472001a9222bb5b6f89a09e73567b6583f9f75a7aff6304a49ef14d0995`. The full file download was performed using Node.js’s built-in HTTP/2 implementation, utilizing a single stream and targeting the same CDN object. A new connection was established for each attempt, with original domain SNI and certificate validation preserved. No local reverse proxies or third-party mirrors were used. This approach was chosen to control protocol-level and client-side variables, rather than relying on the automated behavior of the Edge browser itself.
 
-先对系统解析、两个 `.133` 候选及历史 `.154`/`.215` 候选进行三轮 1 MiB 筛查，再对两个出口交替做两轮完整文件下载。筛查记录 `20261108-201632-935f70`；完整文件记录 `20261108-201653-5adc49`，位于 `bench/runs/<id>/report.json` 与 `report.html`。
+The testing process involved an initial three-round screening (1 MiB chunks) across the system-resolved IP, two `.133` candidate IPs, and historical `.154`/`.215` candidate IPs. This was followed by two rounds of full-file downloads, alternating between the two egress points. Screening records are available under `20261108-201632-935f70`, and full-file download records under `20261108-201653-5adc49` (located in `bench/runs/<id>/report.json` and `report.html`).
 
-## 完整文件结果
+## Full-File Retrieval Results
 
-| 出口 | 第一轮 | 第二轮 | 成功 |
+| Egress Point | Round 1 | Round 2 | Success Rate |
 | --- | ---: | ---: | ---: |
-| 185.199.108.133，当前 DNS 候选 | 1.502 秒 | 1.378 秒 | 2/2 |
-| 185.199.110.154，程序历史候选 | 15 秒超时，收到约 3.24 MB | 11.560 秒 | 1/2 |
+| 185.199.108.133 (Current DNS Candidate) | 1.502 s | 1.378 s | 2/2 |
+| 185.199.110.154 (Historical Candidate) | 15 s timeout (received ~3.24 MB) | 11.560 s | 1/2 |
 
-两组 TLS 完成时间都约 0.12 秒，首字节也都约 0.19–0.21 秒。完整文件成功样本 SHA256 完全一致。`.154` 成功那次约为 `.133` 的八倍耗时；超时单独保留，没有混入成功中位数。这是本机当前时段两轮的结果，不能将该 IP 当作永久最优地址。
+For both sets, TLS completion time was approximately 0.12 seconds, and the Time to First Byte (TTFB) was roughly 0.19–0.21 seconds. The SHA256 hashes of the successfully retrieved full files were identical. The successful attempt via the `.154` address took about eight times longer than the attempts via the `.133` address; the timeout instance was excluded from the median calculation for successful attempts. These results reflect two rounds of testing from the local machine during the current session; this IP should not be considered a permanently optimal choice.
 
-**短片段还会给出不同印象：** `.154` 的 1 MiB 耗时中位数为 0.508 秒，`.108.133` 为 0.720 秒。只看首片甚至会偏向后续整文件更慢的出口。`.215` 测试地址对该原始域名证书不匹配，三次都拒绝，不计作可用快速节点。
+**Short-segment tests can be misleading:** The median time to retrieve a 1 MiB segment was 0.508 seconds for the `.154` address, compared to 0.720 seconds for the `.108.133` address. Relying solely on the initial segment might favor an egress point that is actually slower for full-file transfers. A test address, `.215`, was rejected in all three attempts due to a certificate mismatch for the target domain; therefore, it is not considered a viable, high-performance node.
 
-## 实际环境与选路问题
+## Environment and Routing Considerations
 
-- 检查时，本地 GitHubTurbo/GitPort 引擎、对应 NRPT 和常用反代监听端口均已退出；代理环境变量为空。hosts 仍存在原有 GitHub520 静态表，因此“关闭加速软件”不等于完全恢复默认解析。该表不含最终的 `release-assets.githubusercontent.com` 精确条目。
-- 系统为最终下载域名返回 185.199.108–111.133，并观察到 Edge 与 185.199.108.133 有已建立连接；这与下载域名候选一致，但不能仅凭进程连接表证明某一条连接就是该文件。
-- 程序的 Release 精确种子表先排列四个 `.154`、再四个 `.215`、最后四个 `.133`；`best_direct` 将种子截断到前八个，导致正确 DNS 组的 `.133` 不参与种子分支的首轮竞争。
-- DNS 分支又要等待多个解析任务完成；种子分支一旦先完成合法 TLS 握手就胜出。实际 HTTP 200 会被记为健康，完整正文的持续吞吐尚未进入选路评分。因此程序可能长期保留“握手快、下载慢”的地址。
+- During testing, the local GitHubTurbo/GitPort engine, relevant NRPT (Name Resolution Policy Table) entries, and common reverse-proxy listening ports were all inactive; proxy-related environment variables were unset. However, a static `hosts` file entry from "GitHub520" remained present, meaning that "disabling acceleration software" did not equate to a full restoration of default DNS resolution. This static table does not contain a specific entry for `release-assets.githubusercontent.com`. - The system returned IP addresses in the `185.199.108.133` range for the final download domain, and an established connection between the Edge process and `185.199.108.133` was observed. While this aligns with the candidate download domains, the process connection table alone is insufficient to definitively attribute a specific connection to the file in question.
+- The application’s "release" seed list is ordered as follows: four addresses ending in `.154`, followed by four in `.215`, and finally four in `.133`. The `best_direct` logic truncates this list to the first eight entries, meaning the `.133` addresses—which belong to the correct DNS group—are excluded from the initial selection round.
+- The DNS-based selection branch requires the completion of multiple resolution tasks, whereas the seed-based branch "wins" as soon as a valid TLS handshake is established. An HTTP 200 status is recorded as "healthy," but the actual throughput of the full payload is not yet factored into the routing score. Consequently, the application may persistently favor endpoints that offer fast handshakes but poor download speeds.
 
-结论：此次裸下载更快有直接测量依据，IP/出口选择是重要因素，不能仅归结为分段开销。下一步应优先保留正常解析的健康候选，修正候选截断及 DNS 等待偏置，并用足够长的实际传输、停顿和失败率评价下载线路。短首片、TLS 延迟不能代替持续吞吐。本轮只诊断，未重新启用加速器或将测试 IP 写入日常配置。
+Conclusion: The observed speed advantage of the "raw" (direct) download is supported by empirical measurements, with IP/egress selection playing a significant role—it cannot be attributed solely to the overhead of segmented downloads. Future improvements should prioritize healthy candidates derived from standard DNS resolution, correct the truncation logic and DNS-related selection bias, and evaluate download paths based on sustained transfer rates, latency/pauses, and failure rates. Initial segment speed and TLS handshake latency are not reliable proxies for sustained throughput. This round was limited to diagnostics; the accelerator was not re-enabled, nor were the test IP addresses added to the production configuration.
