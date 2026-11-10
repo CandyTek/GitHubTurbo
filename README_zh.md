@@ -1,6 +1,6 @@
 # GitHubTurbo 0.6.0
 
-面向 Windows 的 GitHub 本地加速器测试版。默认独立运行：本地 DNS、IP 优选、HTTPS 反代和 SNI 兼容策略共同改善 GitHub 网页、Raw、静态资源、Release、源码压缩包及 Git HTTPS 访问。额外 HTTP 代理是可选项，默认 `upstream: null`。
+面向 Windows 和 Linux 的 GitHub 本地加速器测试版。默认独立运行：本地 DNS、IP 优选、HTTPS 反代和 SNI 兼容策略共同改善 GitHub 网页、Raw、静态资源、Release、源码压缩包及 Git HTTPS 访问。额外 HTTP 代理是可选项，默认 `upstream: null`。
 
 ## 普通用户使用
 
@@ -15,6 +15,30 @@
 - 引擎意外退出时，原生守护进程自动执行恢复。断电/重启后，在同一用户下次登录时执行恢复任务。当前不会自动开机启用加速。
 
 启用期间保留整个目录，尤其是 `state/session.json`。该目录保存恢复记录及本机私钥，不应发布、同步或与他人共享。发行包不包含它。
+
+## Linux
+
+Linux 版是单个静态可执行文件，分 x86_64（`linux-x64`）和 64 位 ARM（`linux-arm64`）两种，不依赖发行版自带的 OpenSSL 或 glibc。把 `GitHubTurbo-<版本>-linux-<架构>.tar.gz` 解压到固定目录后运行：
+
+```sh
+sudo ./github-turbo enable     # 启用；普通用户运行时会自动请求 sudo
+sudo ./github-turbo disable    # 停止并恢复全部设置
+sudo ./github-turbo recover    # 启动失败或异常退出后恢复
+./github-turbo git clone ...   # 单条 git 命令走加速引擎，无需 root，不改系统设置
+```
+
+`enable` 会做以下改动，每一项在改之前都先记入 `state/session.json`：
+
+- 把本机 CA 加入系统信任库（Debian/Ubuntu/openSUSE 用 `update-ca-certificates`，Fedora/RHEL/Arch 用 `update-ca-trust`）。git、curl、wget、Python `urllib` 等大多数程序会读取它。自带证书包的程序需单独设置，例如 `NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/github-turbo.crt`，Python `requests` 用 `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`。
+- Firefox 在 Linux 上不读取系统信任库，因此会在 `/etc/firefox/policies` 写入企业策略，让它信任本机 CA（已有的 `policies.json` 会合并而不是覆盖；支持 Snap 与 deb 版，不支持 Flatpak）。`enable` 后需重启 Firefox。
+- 在 `/etc/hosts` 中把常用 GitHub 域名指向 127.0.0.1。原有的 GitHub 条目会被注释，停止后放回。
+- 在执行 sudo 的用户的 `~/.ssh/config` 中为 github.com 加入 `ProxyCommand`。
+- 引擎和守护进程在独立会话中运行，关闭终端或退出 SSH 不影响加速。引擎意外退出时，守护进程会恢复全部设置。
+- 在 systemd 系统上，若启用期间机器断电或重启，`github-turbo-recover.service` 会在下次开机时恢复设置；正常停止时该服务会被删除。
+
+`disable` 还原所有文件后会销毁本机 CA 的私钥，下次 `enable` 会生成一个名称不同的新 CA。Firefox 即使在策略移除后也会保留曾被要求信任的 CA 记录，销毁私钥使这类残留信任无法被利用。手动指向 CA 文件的程序（如 `NODE_EXTRA_CA_CERTS`）路径不变，会自动用上新 CA。
+
+127.0.0.1 的 443 端口必须空闲。若 80 端口已被 Web 服务占用、53 端口已被本地解析器占用，引擎会跳过这两个监听并给出提示，此时只是 `http://` 形式的 GitHub 链接不再自动跳转。Linux 没有像 Windows 那样安全的按域名整体分流 DNS 的系统机制，因此只加速列出的域名（github.com、api、raw、codeload、Release 资源、头像等），其他 GitHub 域名照常直连。Docker 容器使用自己的 `/etc/hosts` 和证书库，不受影响。
 
 ## 默认做了什么
 
@@ -134,6 +158,8 @@ python .\scripts\integration.py
 ```
 
 制作候选版（RC）：运行 `.\scripts\package-rc.ps1`（加 `-NetworkSmoke` 可同时测试经 GitHub 的 `git ls-remote`）。要求工作区无未提交改动，且 `Cargo.toml` 中的版本尚无正式包。脚本依次运行 rustfmt、clippy 和测试，生成 `packages\rc\GitHubTurbo-<版本>-rc.<n>-windows-x64.zip`、`.sha256` 文件及记录提交和逐文件哈希的清单，并运行一次包内程序确认能启动。RC 编号自动递增，已有包不会被覆盖。
+
+Linux 构建（在 Linux 上进行，需要对应架构的 musl 目标、perl、make 和 python3；本机架构构建需 `musl-tools`，交叉构建需 `cargo-zigbuild` 和 zig）：`./scripts/package-linux.sh [--arch x64|arm64]` 会运行测试、构建静态程序，并生成 `packages/GitHubTurbo-<版本>-linux-<架构>.tar.gz`、`.sha256` 文件，以及全部 crate 和静态链接的 OpenSSL、musl 的许可证文本。
 
 默认命令是 `enable`；其他命令为 `disable`、`recover`、`serve`、`diagnose`、`pac`、`git <参数>`。`init-ca` 和 `watch` 是内部管理命令。exe 旁配置优先；手动 serve 可指定配置文件。
 

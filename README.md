@@ -1,6 +1,6 @@
 # GitHubTurbo 0.6.0
 
-A beta-version local accelerator for GitHub on Windows. It runs independently by default, utilizing local DNS, IP optimization, HTTPS reverse proxying, and SNI-compatible strategies to improve access to GitHub web pages, raw files, static assets, releases, source code archives, and Git HTTPS operations. An optional HTTP proxy can be configured (default: `upstream: null`).
+A beta-version local accelerator for GitHub on Windows and Linux. It runs independently by default, utilizing local DNS, IP optimization, HTTPS reverse proxying, and SNI-compatible strategies to improve access to GitHub web pages, raw files, static assets, releases, source code archives, and Git HTTPS operations. An optional HTTP proxy can be configured (default: `upstream: null`).
 
 ## Usage for General Users
 
@@ -17,6 +17,30 @@ Local status dashboard: <http://127.0.0.1:18080/>.
 Please keep the entire directory intact while the service is enabled—especially the `state/session.json` file. This file contains recovery records and your local private key; it should never be shared, synced, or distributed to others. It is not included in the release package.
 
 ![github_turbo.webp](docs/github_turbo.webp)
+
+## Linux
+
+The Linux build is one static executable for x86_64 (`linux-x64`) or 64-bit ARM (`linux-arm64`), with no dependency on the distribution's OpenSSL or glibc. Extract `GitHubTurbo-<version>-linux-<arch>.tar.gz` to a permanent directory and run:
+
+```sh
+sudo ./github-turbo enable     # start; asks for sudo when run as a normal user
+sudo ./github-turbo disable    # stop and restore every setting
+sudo ./github-turbo recover    # restore after a failed start or a crash
+./github-turbo git clone ...   # one git command through the engine, no root, no system changes
+```
+
+`enable` makes these changes, recording each in `state/session.json` before it is made:
+
+- The local CA is added to the system trust store (`update-ca-certificates` on Debian/Ubuntu/openSUSE, `update-ca-trust` on Fedora/RHEL/Arch). git, curl, wget, Python's `urllib` and most programs read it. Programs with their own bundle need it set separately, for example `NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/github-turbo.crt`, or `REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt` for Python `requests`.
+- Firefox, which ignores the system trust store on Linux, gets an enterprise policy in `/etc/firefox/policies` that makes it trust the local CA (an existing `policies.json` is merged, not replaced; works for the Snap and deb packages, not Flatpak). Restart Firefox after `enable`.
+- `/etc/hosts` maps the common GitHub names to 127.0.0.1. Existing GitHub entries are commented out and put back afterwards.
+- A `ProxyCommand` for github.com is added to the `~/.ssh/config` of the user who ran sudo.
+- The engine and a watchdog start in their own session, so closing the terminal or logging out of SSH does not stop them. If the engine exits unexpectedly, the watchdog restores everything.
+- On systemd systems, `github-turbo-recover.service` restores everything at the next boot if the machine went down while enabled. It is removed on a normal stop.
+
+`disable` puts every file back and then destroys the local CA's private key; the next `enable` creates a new CA with its own name. Firefox keeps a record of each CA it was told to trust even after the policy is removed, so this makes such leftover trust unusable. Programs pointed at the CA file by hand (`NODE_EXTRA_CA_CERTS` and the like) pick up the new one automatically, because the path stays the same.
+
+Port 443 on 127.0.0.1 must be free. If a web server already owns port 80 or a local resolver owns port 53, the engine starts without those listeners and says so; only `http://` GitHub links are then not redirected. Unlike Windows, Linux has no safe system-wide way to route whole DNS domains, so only the listed names (github.com, api, raw, codeload, release assets, avatars and similar) are accelerated. Other GitHub names keep working directly. Docker containers use their own `/etc/hosts` and trust store and are not affected.
 
 ## Default Configuration and Features
 
@@ -132,6 +156,8 @@ python .\scripts\integration.py
 ```
 
 To cut a release candidate, run `.\scripts\package-rc.ps1` (add `-NetworkSmoke` to also test `git ls-remote` against GitHub). It requires a clean working tree and a version in `Cargo.toml` that has no final package yet. It runs rustfmt, clippy and the tests, then writes `packages\rc\GitHubTurbo-<version>-rc.<n>-windows-x64.zip` with a `.sha256` file and a manifest of the commit and per-file hashes, and runs the packaged executable once to check it starts. RC numbers count up automatically, and existing packages are never overwritten.
+
+Linux builds (on Linux, with the musl target of each architecture, perl, make and python3; `musl-tools` for a native build, `cargo-zigbuild` and zig for a cross build): `./scripts/package-linux.sh [--arch x64|arm64]` runs the tests, builds the static binary and writes `packages/GitHubTurbo-<version>-linux-<arch>.tar.gz` with a `.sha256` file and the license texts of every crate plus the statically linked OpenSSL and musl.
 
 The default command is `enable`; other available commands include `disable`, `recover`, `serve`, `diagnose`, `pac`, and `git <arguments>`. `init-ca` and `watch` are internal administrative commands. Configuration files located alongside the executable take precedence; when running in `serve` mode, a specific configuration file can be provided.
 

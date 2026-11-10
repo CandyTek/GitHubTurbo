@@ -83,7 +83,11 @@ pub fn run(pid: u32) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn run(pid: u32) -> Result<()> {
+    crate::linux::watch(pid)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn run(_: u32) -> Result<()> {
-    Err(err("Windows watchdog is only available on Windows"))
+    Err(err("The watchdog is only available on Windows and Linux"))
 }

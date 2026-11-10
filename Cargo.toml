@@ -27,6 +27,11 @@ futures-util = "0.3"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# Build OpenSSL into the binary so one file runs on any distribution.
+native-tls = { version = "0.2", features = ["alpn", "vendored"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

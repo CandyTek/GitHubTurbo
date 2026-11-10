@@ -74,9 +74,16 @@ pub fn init_ca(config: &Config, control: SocketAddr) -> Result<()> {
         }
         let key = KeyPair::generate()?;
         let mut params = CertificateParams::default();
+        // A distinct name per CA. OpenSSL picks the issuer by name, so a leftover
+        // copy of an earlier CA with the same name would break verification of
+        // certificates from the new one (Linux replaces its CA on every enable).
+        let id: String = key.public_key_raw()[1..5]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         params
             .distinguished_name
-            .push(DnType::CommonName, "GitHubTurbo Local CA");
+            .push(DnType::CommonName, format!("GitHubTurbo Local CA {id}"));
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
@@ -271,19 +278,42 @@ pub async fn ssh_stdio(state: Arc<State>) -> Result<()> {
 }
 pub struct Listeners {
     https: TcpListener,
-    http: TcpListener,
-    dns: TcpListener,
-    udp: UdpSocket,
+    /// Plain HTTP and DNS are optional: on Linux a web server or a local resolver
+    /// may own those ports, and HTTPS is what matters. The Windows launcher
+    /// requires all of them to be free before it starts the engine.
+    http: Option<TcpListener>,
+    dns: Option<(TcpListener, UdpSocket)>,
     accept: TlsAcceptor,
+}
+/// Binds an optional listener, leaving it off when another program owns the port.
+fn optional<T>(name: &str, result: io::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("transparent: {name} port is in use by another program; {name} listener off");
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+async fn accept_optional(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
 }
 impl Listeners {
     pub async fn bind(config: &Config) -> Result<Self> {
         let accept = acceptor(config)?;
         Ok(Self {
             https: TcpListener::bind(config.https_listen).await?,
-            http: TcpListener::bind(config.http_listen).await?,
-            dns: TcpListener::bind(config.dns_listen).await?,
-            udp: UdpSocket::bind(config.dns_listen).await?,
+            http: optional("HTTP", TcpListener::bind(config.http_listen).await)?,
+            dns: match optional("DNS", TcpListener::bind(config.dns_listen).await)? {
+                Some(tcp) => {
+                    optional("DNS", UdpSocket::bind(config.dns_listen).await)?.map(|udp| (tcp, udp))
+                }
+                None => None,
+            },
             accept,
         })
     }
@@ -292,15 +322,20 @@ impl Listeners {
             https,
             http,
             dns,
-            udp,
             accept,
         } = self;
+        let (dns, udp) = dns.unzip();
         let slots = Arc::new(Semaphore::new(state.config.max_connections));
         let mut jobs: JoinSet<Result<()>> = JoinSet::new();
-        let mut udp_task = tokio::spawn(async move { dns_udp(udp).await });
+        let mut udp_task = tokio::spawn(async move {
+            match udp {
+                Some(udp) => dns_udp(udp).await,
+                None => std::future::pending().await,
+            }
+        });
         loop {
             let (stream, kind) = tokio::select! {
-                value=https.accept()=>(value?.0,0),value=http.accept()=>(value?.0,1),value=dns.accept()=>(value?.0,2),
+                value=https.accept()=>(value?.0,0),value=accept_optional(http.as_ref())=>(value?.0,1),value=accept_optional(dns.as_ref())=>(value?.0,2),
                 result=&mut udp_task=>{return Err(err(&format!("DNS UDP listener stopped: {result:?}")));},
                 Some(result)=jobs.join_next()=>{if let Ok(Err(error))=result{eprintln!("transparent: {error}");}continue;}
             };

@@ -21,7 +21,7 @@ pub async fn status(state: &State) -> serde_json::Value {
     let entries:Vec<_>=routes.iter().map(|(host,cached)|serde_json::json!({"host":host.strip_prefix("bulk:").unwrap_or(host),"profile":if host.starts_with("bulk:"){"bulk"}else{"latency"},"route":cached.route,"age_seconds":cached.at.elapsed().as_secs()})).collect();
     drop(routes);
     let c = &state.counters;
-    serde_json::json!({"name":"GitHubTurbo","version":env!("CARGO_PKG_VERSION"),"transparent":state.config.transparent.enabled,"listen":state.config.listen,"upstream":state.config.upstream,"mode":state.config.mode,"host_modes":state.config.host_modes,"optimization":state.optimization(),"uptime_seconds":state.started.elapsed().as_secs(),"accepted":c.accepted.load(Ordering::Relaxed),"completed":c.completed.load(Ordering::Relaxed),"failures":c.failures.load(Ordering::Relaxed),"uploaded_bytes":c.uploaded.load(Ordering::Relaxed),"downloaded_bytes":c.downloaded.load(Ordering::Relaxed),"routes":entries,"pool":state.pool.snapshot().await,"health":state.health.snapshot(),"cache":state.content_cache.snapshot(),"range_memo":state.download_memo.snapshot(),"warm_tls":state.warm.snapshot().await,"split_active":2-state.split_slots.available_permits(),"host_sources":state.sources.snapshot(),"transfer_history":state.performance.snapshot(),"rescue":state.rescue.snapshot(),"prewarm":state.prewarm.snapshot(),"git_race":state.race.snapshot(),"ipv6":state.resolver.ipv6.snapshot()})
+    serde_json::json!({"name":"GitHubTurbo","version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"platform":std::env::consts::OS,"transparent":state.config.transparent.enabled,"listen":state.config.listen,"upstream":state.config.upstream,"mode":state.config.mode,"host_modes":state.config.host_modes,"optimization":state.optimization(),"uptime_seconds":state.started.elapsed().as_secs(),"accepted":c.accepted.load(Ordering::Relaxed),"completed":c.completed.load(Ordering::Relaxed),"failures":c.failures.load(Ordering::Relaxed),"uploaded_bytes":c.uploaded.load(Ordering::Relaxed),"downloaded_bytes":c.downloaded.load(Ordering::Relaxed),"routes":entries,"pool":state.pool.snapshot().await,"health":state.health.snapshot(),"cache":state.content_cache.snapshot(),"range_memo":state.download_memo.snapshot(),"warm_tls":state.warm.snapshot().await,"split_active":2-state.split_slots.available_permits(),"host_sources":state.sources.snapshot(),"transfer_history":state.performance.snapshot(),"rescue":state.rescue.snapshot(),"prewarm":state.prewarm.snapshot(),"git_race":state.race.snapshot(),"ipv6":state.resolver.ipv6.snapshot()})
 }
 pub async fn write(path: &str, stream: &mut TcpStream, state: &Arc<State>) -> Result<()> {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
@@ -137,6 +137,24 @@ pub async fn write(path: &str, stream: &mut TcpStream, state: &Arc<State>) -> Re
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()?;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::process::CommandExt;
+                // Its own session: `disable` stops this engine and must outlive it.
+                let mut disable = std::process::Command::new(std::env::current_exe()?);
+                disable
+                    .arg("disable")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                unsafe {
+                    disable.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+                disable.spawn()?;
             }
             Ok(())
         }

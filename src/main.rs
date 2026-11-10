@@ -34,6 +34,8 @@ mod forward;
 mod git_wrapper;
 mod health;
 mod ipv6;
+#[cfg(target_os = "linux")]
+mod linux;
 mod pool;
 mod prewarm;
 mod race;
@@ -1115,10 +1117,17 @@ async fn diagnose(state: Arc<State>) -> Result<()> {
     Ok(())
 }
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<()> {
+async fn main() {
+    // A plain message, not the Debug form `Result` returned from main would print.
+    if let Err(error) = run().await {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+async fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
-        println!("GitHubTurbo 0.5\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\n       github-turbo git <git arguments>   (one git command, no system changes)\nDefault: enable system integration. Config: beside executable, otherwise ./config.json");
+        println!("GitHubTurbo {}\nUsage: github-turbo [enable|disable|recover|serve|diagnose|pac|init-ca] [config.json]\n       github-turbo git <git arguments>   (one git command, no system changes)\nDefault: enable system integration (Windows and Linux). Config: beside executable, otherwise ./config.json", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let command = args.first().map(String::as_str).unwrap_or("enable");
@@ -1148,6 +1157,11 @@ async fn main() -> Result<()> {
                 .parse()?,
         );
     }
+    #[cfg(target_os = "linux")]
+    if matches!(command, "enable" | "disable" | "recover") {
+        return linux::run(command);
+    }
+    #[cfg(windows)]
     if matches!(command, "enable" | "disable" | "recover") {
         let script = std::env::current_exe()?.with_file_name("windows.ps1");
         let status = std::process::Command::new("powershell.exe")
@@ -1252,8 +1266,11 @@ async fn main() -> Result<()> {
     );
     let slots = Arc::new(Semaphore::new(state.config.max_connections));
     let mut tasks = JoinSet::new();
+    let terminate = terminated();
+    tokio::pin!(terminate);
     loop {
         tokio::select! {
+            _ = &mut terminate => break,
             result=async {match transparent_task.as_mut(){Some(task)=>Some(task.await),None=>std::future::pending().await}}=>{return Err(err(&format!("transparent listener stopped: {result:?}")));},
             _ = tokio::signal::ctrl_c() => break,
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
@@ -1271,6 +1288,21 @@ async fn main() -> Result<()> {
     sources_task.abort();
     let _ = state.persist_routes().await;
     Ok(())
+}
+
+/// SIGTERM (`disable`, `kill`, systemd) stops the engine like Ctrl+C does.
+#[cfg(unix)]
+async fn terminated() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut signal) => {
+            signal.recv().await;
+        }
+        Err(_) => std::future::pending().await,
+    }
+}
+#[cfg(not(unix))]
+async fn terminated() {
+    std::future::pending().await
 }
 
 #[cfg(test)]
