@@ -16,6 +16,8 @@ Local status dashboard: <http://127.0.0.1:18080/>.
 
 Please keep the entire directory intact while the service is enabled—especially the `state/session.json` file. This file contains recovery records and your local private key; it should never be shared, synced, or distributed to others. It is not included in the release package.
 
+![github_turbo.webp](docs/github_turbo.webp)
+
 ## Default Configuration and Features
 
 | Layer | Implementation |
