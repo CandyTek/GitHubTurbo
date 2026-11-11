@@ -94,6 +94,8 @@ impl Fixture {
             .request_alpns(&["http/1.1"])
             .build()?
             .into();
+        // Most tests count connections exactly. Spreading opens more of them.
+        state.pool.spread.store(false, Ordering::Relaxed);
         let accept = transparent::acceptor(&state.config.transparent)?;
         let backend = TcpListener::bind("127.0.0.1:0").await?;
         state
@@ -488,6 +490,51 @@ async fn prewarmed_connection_serves_the_first_request() -> Result<()> {
     let response = client.send_request(Fixture::request("/no-range")).await?;
     assert_eq!(response.into_body().collect().await?.to_bytes(), f.data);
     assert_eq!(f.connections.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn web_requests_are_spread_over_a_bounded_number_of_connections() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.state.pool.spread.store(true, Ordering::Relaxed);
+    async fn settled(f: &Fixture, connections: u64) -> bool {
+        for _ in 0..100 {
+            if f.connections.load(Ordering::Relaxed) >= connections {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        f.connections.load(Ordering::Relaxed) == connections
+    }
+    let mut client = f.client().await?;
+    let reply = client.send_request(Fixture::request("/slow")).await?;
+    reply.into_body().collect().await?;
+    assert!(settled(&f, 2).await, "the only connection was in use");
+    let reply = client.send_request(Fixture::request("/slow")).await?;
+    reply.into_body().collect().await?;
+    assert!(settled(&f, 2).await, "an idle connection was available");
+    // Two connections take four requests each. The rest of a burst opens more,
+    // side by side, and never more than the limit.
+    let start = Instant::now();
+    let mut jobs = JoinSet::new();
+    for _ in 0..40 {
+        let mut client = client.clone();
+        jobs.spawn(async move {
+            let reply = client.send_request(Fixture::request("/slow")).await;
+            let reply = reply.unwrap();
+            assert_eq!(reply.status(), 200);
+            reply.into_body().collect().await.unwrap();
+        });
+    }
+    while let Some(job) = jobs.join_next().await {
+        job?;
+    }
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(settled(&f, 6).await, "the limit per host");
+    let pools = f.state.pool.snapshot().await;
+    let channels = pools["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 6);
+    assert!(channels.iter().all(|c| c["active"] == 0));
     Ok(())
 }
 #[tokio::test]
